@@ -744,7 +744,10 @@ def restore(link=None, key=None):
     if not b:
         return False
     live, kept = kc_read(CLAUDE_SERVICE), kc_read(BACKUP_SERVICE)
-    if live and not is_borrowed_sign_in(live):
+    note = None
+    if live and live == kept:
+        kc_delete(BACKUP_SERVICE)  # the borrow never got in place: the Mac's own is there
+    elif live and not is_borrowed_sign_in(live):
         # Signed in again (/login) while borrowing: that sign-in is the one in
         # use now; the kept one stays aside, for the person to decide.
         note = "A new sign-in was made while borrowing: it stays; the old one is kept in the Keychain item " \
@@ -752,10 +755,8 @@ def restore(link=None, key=None):
     elif kept:
         kc_write(kept, CLAUDE_SERVICE, b.get("kc_account", ""))
         kc_delete(BACKUP_SERVICE)
-        note = None
     else:
         kc_delete(CLAUDE_SERVICE)  # the Mac had no sign-in before the borrow
-        note = None
     with_suppressed(os.remove, BORROW_FILE)
     if link and key:
         try:
@@ -826,8 +827,10 @@ def cmd_use(aid):
             live = kc_read(CLAUDE_SERVICE)
             account = kc_account(CLAUDE_SERVICE)
             # The Mac's own sign-in goes aside first; if that fails, nothing changed.
-            # One already aside (a borrow cut short) is the Mac's own: it stays.
-            if live and not is_borrowed_sign_in(live) and not kc_read(BACKUP_SERVICE):
+            # It always replaces what was aside: an older one may hold a refresh
+            # token rotated since. Only a borrowed one in place (a borrow cut
+            # short) leaves the kept one alone: that is the Mac's own.
+            if live and not is_borrowed_sign_in(live):
                 kc_write(live, BACKUP_SERVICE, account)
             write_json(BORROW_FILE, {"lease_id": out["lease_id"], "account": aid, "label": label,
                                      "ends_at": ends_at, "started": time.time(), "kc_account": account,
@@ -927,6 +930,10 @@ def cmd_uninstall():
         shutil.rmtree(CLIENT_DIR, ignore_errors=True)
     print("Token Station is off this Mac: its own Claude sign-in is back, the agent and the client are gone.\n"
           "Revoke this Mac on the hub's Machines page too.")
+    if kc_read(BACKUP_SERVICE):
+        print(f"An older sign-in is still kept in the Keychain item \"{BACKUP_SERVICE}\" (a /login made while "
+              f"borrowing took its place). Delete it when you don't need it: "
+              f"security delete-generic-password -s \"{BACKUP_SERVICE}\"")
 
 
 def main(argv):
