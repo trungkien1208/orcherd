@@ -14,6 +14,15 @@ Orcherd without a hub works exactly as before.
                                          the chat last had in <from> (- is ~/.claude)
   tokenstation.py forget                 unpair: key, settings, cache and leases gone
 
+On a Mac with no Orcherd, only a terminal (installed by the hub's
+/client/install.sh, used as `hubclaude`):
+
+  tokenstation.py list                   the hub's accounts, the day, what this Mac borrows
+  tokenstation.py use <id>               borrow: plain `claude` runs on hub account <id>
+  tokenstation.py restore                give this Mac its own Claude sign-in back
+  tokenstation.py service install|remove the agent that runs `sync` every minute
+  tokenstation.py uninstall              restore, unpair, remove the agent and the client
+
 Files: ~/.config/orcherd/station.json (the hub's address, its cert pin, this
 Mac's id, the hub's name), the machine key in the Keychain item
 "orcherd-station-device", and in ~/.cache/orcherd: station.json (the hub's
@@ -28,10 +37,22 @@ never argv, never a file. So it leaves this Mac when that claude ends, and
 Orcherd ends it (and what it started, which has its env) when the lease
 ends: at the day's end (even with the hub out of reach), when the hub says
 so (Stop on its Live page, account deleted) and when the hub no longer
-knows this Mac (revoked). The machine key lives in the Keychain and reaches
+knows this Mac (revoked).
+
+Borrow (`use`) is the one place a token is written down: as the sign-in of
+~/.claude in the Keychain (Claude's own item, "Claude Code-credentials"), so
+a plain `claude`, and the ones already running, use the hub account. The
+Mac's own sign-in waits in the Keychain item "token-station-borrow-backup"
+and goes back on `restore`, at the day's end, on Stop, and when the hub no
+longer knows this Mac. The borrowed sign-in also says it expires at the
+day's end, so Claude stops using it then even if nothing here runs.
+
+This file's original is token-station's client/tokenstation.py (the hub
+serves it to terminal-only Macs); Orcherd's mods/orcha/bin/ has a copy. The machine key lives in the Keychain and reaches
 curl on stdin. The hub's cert is pinned (curl --pinnedpubkey) from pairing on.
 """
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -58,6 +79,16 @@ USAGE_FILE = os.path.join(CACHE, "station-usage.json")
 LIMITS = os.path.join(CACHE, "limits")
 ORCHERD_CONFIG = os.path.join(CONFIG_DIR, "config.json")
 KC_SERVICE = "orcherd-station-device"
+# The sign-in a plain `claude` (config folder ~/.claude) reads, and where a
+# borrow keeps the Mac's own while a hub account is in its place.
+CLAUDE_SERVICE = "Claude Code-credentials"
+BACKUP_SERVICE = "token-station-borrow-backup"
+BORROW_FILE = os.path.join(CACHE, "station-borrow.json")
+LOCK_FILE = os.path.join(CACHE, "station.lock")
+CLIENT_DIR = os.path.join(HOME, ".local", "share", "token-station-client")
+WRAPPER = os.path.join(HOME, ".local", "bin", "hubclaude")
+AGENT_LABEL = "com.token-station.client"
+AGENT_PLIST = os.path.join(HOME, "Library", "LaunchAgents", f"{AGENT_LABEL}.plist")
 DEFAULT_PORT = 8787
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write")
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -106,43 +137,63 @@ def with_suppressed(fn, *a):
         pass
 
 
-# ---------- the Keychain: the machine key, on stdin only
+# ---------- the Keychain: secrets on stdin only
 # ORCHERD_STATION_TEST_KEY_FILE: tests only, so they never touch the real
-# Keychain (with HOME pointed elsewhere for the files).
+# Keychain (with HOME pointed elsewhere for the files): each item is a file
+# next to it, and no launchd agent is loaded.
 TEST_KEY_FILE = os.environ.get("ORCHERD_STATION_TEST_KEY_FILE")
 
 
-def kc_read():
+def kc_test_path(service):
+    return TEST_KEY_FILE if service == KC_SERVICE else f"{TEST_KEY_FILE}-{re.sub(r'[^A-Za-z0-9]+', '_', service)}"
+
+
+def kc_read(service=KC_SERVICE):
     if TEST_KEY_FILE:
         try:
-            with open(TEST_KEY_FILE) as fh:
+            with open(kc_test_path(service)) as fh:
                 return fh.read().strip() or None
         except OSError:
             return None
-    r = subprocess.run(["security", "find-generic-password", "-s", KC_SERVICE, "-w"],
+    r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
                        capture_output=True, text=True, timeout=10)
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
-def kc_write(secret):
-    """`security -i` reads the command on stdin, so the key never shows in
+def kc_account(service):
+    """The item's account attribute (Claude writes the user name there)."""
+    if TEST_KEY_FILE:
+        return os.environ.get("USER", "")
+    r = subprocess.run(["security", "find-generic-password", "-s", service],
+                       capture_output=True, text=True, timeout=10)
+    m = re.search(r'"acct"<blob>="([^"]*)"', r.stdout)
+    return m.group(1) if m else os.environ.get("USER", "")
+
+
+def kc_write(secret, service=KC_SERVICE, account="orcherd"):
+    """`security -i` reads the command on stdin, so the secret never shows in
     ps; read back, because `security -i` can fail and still exit 0."""
     if TEST_KEY_FILE:
-        make_dir(os.path.dirname(TEST_KEY_FILE))
-        with open(os.open(TEST_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        path = kc_test_path(service)
+        make_dir(os.path.dirname(path))
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
             fh.write(secret)
         return
-    cmd = f'add-generic-password -U -s "{KC_SERVICE}" -a "orcherd" -X {secret.encode().hex()}\n'
+    if not re.fullmatch(r"[\w .@+-]*", account):
+        account = os.environ.get("USER", "")
+    cmd = f'add-generic-password -U -s "{service}" -a "{account}" -X {secret.encode().hex()}\n'
     r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=10)
-    if r.returncode != 0 or kc_read() != secret:
-        raise Fail("The machine key could not go in the macOS Keychain (locked?). Unlock it and pair again.")
+    if r.returncode != 0 or kc_read(service) != secret:
+        if service == KC_SERVICE:
+            raise Fail("The machine key could not go in the macOS Keychain (locked?). Unlock it and pair again.")
+        raise Fail("The macOS Keychain could not be written (locked?). Unlock it and try again.")
 
 
-def kc_delete():
+def kc_delete(service=KC_SERVICE):
     if TEST_KEY_FILE:
-        with_suppressed(os.remove, TEST_KEY_FILE)
+        with_suppressed(os.remove, kc_test_path(service))
         return
-    subprocess.run(["security", "delete-generic-password", "-s", KC_SERVICE],
+    subprocess.run(["security", "delete-generic-password", "-s", service],
                    capture_output=True, timeout=10)
 
 
@@ -514,6 +565,21 @@ def local_fuel(hub_emails):
     return out
 
 
+class locked:
+    """One of sync / use / restore at a time: the agent's minute and Orcherd's
+    fuel tick may both sync while the person types `hubclaude use`."""
+
+    def __enter__(self):
+        make_dir(CACHE)
+        self.fh = open(LOCK_FILE, "a")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
 def sync(link):
     """One tick: the hub's accounts (for ACCOUNTS), then a heartbeat with every
     pane still running on a hub account, the tokens their chats spent, a
@@ -526,6 +592,10 @@ def sync(link):
     for l in leases:
         if isinstance(l.get("ends_at"), (int, float)) and time.time() >= l["ends_at"]:
             stop(l)
+    b = borrowed()
+    if b and time.time() >= b.get("ends_at", 0):
+        restore()  # the day is over: the hub ended that lease already
+        b = None
     key = kc_read()
     cache = read_json(CACHE_FILE) or {}
     if not key:
@@ -543,6 +613,7 @@ def sync(link):
         for l in leases:
             stop(l)
             with_suppressed(os.remove, os.path.join(LEASES, f"{l['lease_id']}.json"))
+        restore()
         cache.update(at=time.time(), error="This Mac was revoked on the hub: pair it again.", accounts=[],
                      grant={"open": False, "ends_at": None})
         write_json(CACHE_FILE, cache)
@@ -587,6 +658,15 @@ def sync(link):
             items.append({"lease_id": l["lease_id"], "pane": l.get("pane", ""), "cwd": l.get("cwd", ""),
                           **({"tokens": dict(zip(TOKEN_FIELDS, l["tokens"]))} if l is first else {}),
                           **({"auth_failed": True} if failed and l is first else {})})
+    if b:
+        # Borrowed: every chat of ~/.claude since the borrow began is the hub account's.
+        totals, failed = read_transcripts(os.path.join(HOME, ".claude"), b["started"], usage.setdefault("borrow", {}))
+        before = sent.get("borrow", [0, 0, 0, 0])
+        b["tokens"] = [a + max(0, t - x) for a, t, x in zip(b.get("tokens", [0, 0, 0, 0]), totals, before)]
+        sent["borrow"] = totals
+        write_json(BORROW_FILE, b)
+        items.append({"lease_id": b["lease_id"], "pane": "borrow", "cwd": HOME,
+                      "tokens": dict(zip(TOKEN_FIELDS, b["tokens"])), **({"auth_failed": True} if failed else {})})
     write_json(USAGE_FILE, usage)
     emails = {(a.get("email") or "").lower() for a in accounts if a.get("email")}
     try:
@@ -598,6 +678,11 @@ def sync(link):
         return
     ended = set(out.get("ended", []))
     grant = out.get("grant") or {}
+    if b and b["lease_id"] in ended:
+        restore()
+    elif b and grant.get("open") and isinstance(grant.get("ends_at"), (int, float)) \
+            and grant["ends_at"] != b.get("ends_at"):
+        move_borrow_end(b, grant["ends_at"])
     for l in live:
         if l["lease_id"] in ended:
             stop(l)
@@ -612,7 +697,236 @@ def sync(link):
 def cmd_sync():
     link = read_json(LINK_FILE)
     if link:  # not paired: nothing to do, nothing to say
+        with locked():
+            sync(link)
+    elif borrowed():
+        with locked():
+            restore()  # unpaired while borrowing: the Mac's own sign-in comes back
+
+
+# ---------- borrow: a hub account in the place of this Mac's own sign-in
+
+def borrowed():
+    return read_json(BORROW_FILE)
+
+
+def borrow_sign_in(token, ends_at):
+    """A sign-in as Claude keeps it, made of the setup-token: no refresh token
+    (it can't be refreshed, and needn't be), and it says it ends with the day."""
+    return json.dumps({"claudeAiOauth": {"accessToken": token, "refreshToken": None,
+                                         "expiresAt": int(ends_at * 1000), "scopes": ["user:inference"]}})
+
+
+def is_borrowed_sign_in(raw):
+    """Claude's own sign-ins always carry a refresh token; a borrowed one never."""
+    try:
+        return not json.loads(raw)["claudeAiOauth"].get("refreshToken")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
+def move_borrow_end(b, ends_at):
+    """Start day again moved the day's end: so does the borrowed sign-in's."""
+    raw = kc_read(CLAUDE_SERVICE)
+    if raw and is_borrowed_sign_in(raw):
+        o = json.loads(raw)
+        o["claudeAiOauth"]["expiresAt"] = int(ends_at * 1000)
+        kc_write(json.dumps(o), CLAUDE_SERVICE, b.get("kc_account", ""))
+    b["ends_at"] = ends_at
+    write_json(BORROW_FILE, b)
+
+
+def restore(link=None, key=None):
+    """This Mac's own sign-in back in its place, the borrowed one gone, the
+    lease released (when link and key are given; else the hub has ended it or
+    ends it in 90 s). True when something was borrowed."""
+    b = borrowed()
+    if not b:
+        return False
+    live, kept = kc_read(CLAUDE_SERVICE), kc_read(BACKUP_SERVICE)
+    if live and not is_borrowed_sign_in(live):
+        # Signed in again (/login) while borrowing: that sign-in is the one in
+        # use now; the kept one stays aside, for the person to decide.
+        note = "A new sign-in was made while borrowing: it stays; the old one is kept in the Keychain item " \
+               f"\"{BACKUP_SERVICE}\"."
+    elif kept:
+        kc_write(kept, CLAUDE_SERVICE, b.get("kc_account", ""))
+        kc_delete(BACKUP_SERVICE)
+        note = None
+    else:
+        kc_delete(CLAUDE_SERVICE)  # the Mac had no sign-in before the borrow
+        note = None
+    with_suppressed(os.remove, BORROW_FILE)
+    if link and key:
+        try:
+            request(link, "POST", "/api/v1/release", {"lease_id": b["lease_id"]}, key=key)
+        except Fail:
+            pass  # the hub ends it after 90 s without a heartbeat
+    if note:
+        sys.stderr.write(note + "\n")
+    return True
+
+
+def linked():
+    link, key = read_json(LINK_FILE), kc_read()
+    if not link or not key:
+        raise Fail("This Mac isn't paired with a hub: run the command from the hub's Machines › Add machine page.")
+    return link, key
+
+
+def when(ts):
+    return datetime.fromtimestamp(ts).strftime("%H:%M") if isinstance(ts, (int, float)) else "?"
+
+
+def cmd_list():
+    link, _ = linked()
+    with locked():
         sync(link)
+    cache = read_json(CACHE_FILE) or {}
+    grant = cache.get("grant") or {}
+    print(f"Hub {cache.get('hub_name') or link.get('hub_name') or link['url']}: "
+          + (f"day open until {when(grant.get('ends_at'))}" if grant.get("open") else "day off (Start day on the hub)"))
+    if cache.get("error"):
+        print(f"  {cache['error']}")
+    for a in cache.get("accounts", []):
+        state = ("disabled" if not a.get("enabled") else "needs renew" if a.get("needs_renew")
+                 else f"limit {a.get('live_leases')}/{a['max_leases']}"
+                 if a.get("max_leases") is not None and a.get("live_leases", 0) >= a["max_leases"]
+                 else "ready" if grant.get("open") else "day off")
+        fuel = (a.get("fuel") or {}).get("session")
+        fuel = f"  5h {fuel[0]:.0f}%" if isinstance(fuel, list) and fuel and fuel[0] is not None else ""
+        print(f"  {a['id']:>3}  {a.get('label', '')[:20]:<20} {(a.get('email') or '')[:30]:<30} {state}{fuel}")
+    b = borrowed()
+    print(f"\nBorrowing {b.get('label') or b['account']} until {when(b.get('ends_at'))}: `hubclaude restore` gives the Mac its own sign-in back."
+          if b else "\n`hubclaude use <id>`: plain `claude` runs on that account until the day ends.")
+
+
+def cmd_use(aid):
+    if not re.fullmatch(r"\d{1,9}", aid):
+        raise Fail("hubclaude use <id>: the id `hubclaude` lists.")
+    link, key = linked()
+    if os.path.exists(os.path.join(HOME, ".claude", ".credentials.json")):
+        raise Fail("Claude keeps this Mac's sign-in in ~/.claude/.credentials.json, not the Keychain, so it "
+                   "can't be swapped. `hubclaude run <id>` starts one claude on the hub account instead.")
+    with locked():
+        b = borrowed()
+        if b and str(b["account"]) == aid:
+            print(f"Already on {b.get('label') or aid} until {when(b.get('ends_at'))}.")
+            return
+        if b:
+            restore(link, key)
+        status, out = request(link, "POST", f"/api/v1/accounts/{aid}/lease", {"pane": "borrow", "cwd": HOME}, key=key)
+        if status != 201:
+            held = "".join(f"\n  · {l.get('machine')} {l.get('pane') or ''}" for l in out.get("leases", []))
+            raise Fail(f"{why(out, f'The hub said no ({status}).')}{held}")
+        token, ends_at = out["token"], out.get("ends_at") or time.time() + 8 * 3600
+        label = next((a.get("label") for a in (read_json(CACHE_FILE) or {}).get("accounts", [])
+                      if str(a.get("id")) == aid), None)
+        try:
+            live = kc_read(CLAUDE_SERVICE)
+            account = kc_account(CLAUDE_SERVICE)
+            # The Mac's own sign-in goes aside first; if that fails, nothing changed.
+            # One already aside (a borrow cut short) is the Mac's own: it stays.
+            if live and not is_borrowed_sign_in(live) and not kc_read(BACKUP_SERVICE):
+                kc_write(live, BACKUP_SERVICE, account)
+            write_json(BORROW_FILE, {"lease_id": out["lease_id"], "account": aid, "label": label,
+                                     "ends_at": ends_at, "started": time.time(), "kc_account": account,
+                                     "tokens": [0, 0, 0, 0]})
+            kc_write(borrow_sign_in(token, ends_at), CLAUDE_SERVICE, account)
+        except Exception:
+            restore(link, key)
+            raise
+        # Token use counts from now: the chats already there are the Mac's own.
+        usage = read_json(USAGE_FILE) or {}
+        files = {}
+        for root, _dirs, names in os.walk(os.path.join(HOME, ".claude", "projects")):
+            for n in names:
+                if n.endswith(".jsonl"):
+                    try:
+                        st = os.stat(os.path.join(root, n))
+                    except OSError:
+                        continue
+                    files[os.path.join(root, n)] = {"offset": st.st_size, "ino": st.st_ino, "id": None,
+                                                    "last": [0, 0, 0, 0], "tot": [0, 0, 0, 0]}
+        usage["borrow"] = {"files": files}
+        usage.setdefault("sent", {})["borrow"] = [0, 0, 0, 0]
+        write_json(USAGE_FILE, usage)
+    print(f"Plain `claude` now runs on {label or 'hub account ' + aid} until {when(ends_at)} (the day's end); "
+          "ones already running switch within half a minute.\n"
+          "`hubclaude restore` gives this Mac its own sign-in back (it also comes back by itself when the day ends).")
+
+
+def cmd_restore():
+    link, key = read_json(LINK_FILE), kc_read()
+    with locked():
+        done = restore(link, key) if link and key else restore()
+    print("This Mac's own Claude sign-in is back; running claudes switch within half a minute."
+          if done else "Nothing borrowed: this Mac is on its own sign-in.")
+
+
+# ---------- the agent: sync every minute, for a Mac with no Orcherd
+
+def cmd_service(action):
+    if action == "install":
+        logs = os.path.join(HOME, "Library", "Logs", "token-station-client.log")
+        text = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{AGENT_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{sys.executable}</string><string>-I</string><string>{os.path.abspath(__file__)}</string><string>sync</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>{logs}</string>
+  <key>StandardErrorPath</key><string>{logs}</string>
+</dict></plist>
+"""
+        os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+        with open(AGENT_PLIST, "w") as fh:
+            fh.write(text)
+    elif action != "remove":
+        raise Fail("tokenstation.py service install | remove")
+    uid = os.getuid()
+    if not TEST_KEY_FILE:  # tests: the plist only, never a real agent
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{AGENT_LABEL}"], capture_output=True, timeout=20)
+    if action == "remove":
+        with_suppressed(os.remove, AGENT_PLIST)
+    elif not TEST_KEY_FILE:
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST], capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            raise Fail(f"launchctl could not start the agent: {r.stderr.strip()[:120]}")
+
+
+def cmd_uninstall():
+    """Everything back as before the install: own sign-in, no pairing, no
+    agent, no client. The hub still lists this Mac: revoke it there."""
+    link, key = read_json(LINK_FILE), kc_read()
+    with locked():
+        if link and key:
+            restore(link, key)
+        else:
+            restore()
+        for l in read_leases():
+            stop(l)
+            if link and key:
+                try:
+                    request(link, "POST", "/api/v1/release", {"lease_id": l["lease_id"]}, key=key)
+                except Fail:
+                    pass
+    cmd_service("remove")
+    cmd_forget()
+    with_suppressed(os.remove, LOCK_FILE)
+    try:
+        with open(WRAPPER) as fh:
+            ours = CLIENT_DIR in fh.read()
+    except OSError:
+        ours = False
+    if ours:
+        with_suppressed(os.remove, WRAPPER)
+    if os.path.dirname(os.path.abspath(__file__)) == CLIENT_DIR:
+        shutil.rmtree(CLIENT_DIR, ignore_errors=True)
+    print("Token Station is off this Mac: its own Claude sign-in is back, the agent and the client are gone.\n"
+          "Revoke this Mac on the hub's Machines page too.")
 
 
 def main(argv):
@@ -632,8 +946,18 @@ def main(argv):
             cmd_adopt(*rest)
         elif cmd == "forget":
             cmd_forget()
+        elif cmd == "list" and not rest:
+            cmd_list()
+        elif cmd == "use" and len(rest) == 1:
+            cmd_use(rest[0])
+        elif cmd == "restore" and not rest:
+            cmd_restore()
+        elif cmd == "service" and len(rest) == 1:
+            cmd_service(rest[0])
+        elif cmd == "uninstall" and not rest:
+            cmd_uninstall()
         else:
-            sys.exit(__doc__.split("\n\n")[1])
+            sys.exit("\n\n".join(p for p in __doc__.split("\n\n") if p.lstrip().startswith("tokenstation.py")))
     except Fail as e:
         sys.exit(str(e))
 
