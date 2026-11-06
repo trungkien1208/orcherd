@@ -84,6 +84,7 @@ KC_SERVICE = "orcherd-station-device"
 CLAUDE_SERVICE = "Claude Code-credentials"
 BACKUP_SERVICE = "token-station-borrow-backup"
 BORROW_FILE = os.path.join(CACHE, "station-borrow.json")
+BORROW_LAST = os.path.join(CACHE, "station-borrow-last.json")  # a borrow was restored: watch for it coming back
 LOCK_FILE = os.path.join(CACHE, "station.lock")
 CLIENT_DIR = os.path.join(HOME, ".local", "share", "token-station-client")
 WRAPPER = os.path.join(HOME, ".local", "bin", "hubclaude")
@@ -148,7 +149,10 @@ def kc_test_path(service):
     return TEST_KEY_FILE if service == KC_SERVICE else f"{TEST_KEY_FILE}-{re.sub(r'[^A-Za-z0-9]+', '_', service)}"
 
 
-def kc_read(service=KC_SERVICE):
+def kc_read(service=KC_SERVICE, strict=False):
+    """The item's secret, or None when there is no such item. strict: any
+    other failure (a locked Keychain) raises, so it is never taken for "none"
+    and acted on (a sign-in deleted because it could not be read)."""
     if TEST_KEY_FILE:
         try:
             with open(kc_test_path(service)) as fh:
@@ -157,7 +161,11 @@ def kc_read(service=KC_SERVICE):
             return None
     r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
                        capture_output=True, text=True, timeout=10)
-    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    if r.returncode == 0:
+        return r.stdout.strip() or None
+    if strict and r.returncode != 44:  # 44: errSecItemNotFound
+        raise Fail("The macOS Keychain can't be read now (locked?): unlock it and try again. Nothing was changed.")
+    return None
 
 
 def kc_account(service):
@@ -428,7 +436,9 @@ def alive(lease):
     (ps -E), so a reused pid is not taken for it."""
     r = subprocess.run(["ps", "-E", "-ww", "-o", "command=", "-p", str(lease["pid"])],
                        capture_output=True, text=True, timeout=10)
-    return r.returncode == 0 and f"CLAUDE_CONFIG_DIR={lease['folder']}" in r.stdout
+    # The whole value: station/1 must not match a claude of station/12.
+    return r.returncode == 0 and re.search(rf"(^|\s)CLAUDE_CONFIG_DIR={re.escape(lease['folder'])}(\s|$)",
+                                           r.stdout) is not None
 
 
 def running(pid):
@@ -460,12 +470,30 @@ def tree(pid):
     return out
 
 
-def stop(lease):
+def stop(lease, why="its hub lease ended"):
     """Ends the lease's claude and everything under it, so its token is gone
-    from this Mac. The chat stays on disk: Restart goes on with it."""
+    from this Mac. The chat stays on disk: Restart goes on with it. The
+    pane's terminal is told why, or it would just go quiet."""
     if not alive(lease):
         return
+    r = subprocess.run(["ps", "-o", "tty=", "-p", str(lease["pid"])], capture_output=True, text=True, timeout=10)
+    tty = r.stdout.strip() if r.returncode == 0 else ""
     pids = tree(lease["pid"])
+    try:
+        stop_pids(pids)
+    finally:
+        if re.fullmatch(r"ttys?\d+", tty):
+            try:
+                # O_NOCTTY: the agent has no terminal and must not take this one.
+                fd = os.open(f"/dev/{tty}", os.O_WRONLY | os.O_NOCTTY)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(f"\r\n\r\n[Token Station] claude stopped: {why}. The chat is kept: "
+                             "restart on the account while the hub's day is on.\r\n")
+            except OSError:
+                pass
+
+
+def stop_pids(pids):
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for p in pids:
             with_suppressed(os.kill, p, sig)
@@ -591,7 +619,8 @@ def sync(link):
     # and is released below once the hub answers.
     for l in leases:
         if isinstance(l.get("ends_at"), (int, float)) and time.time() >= l["ends_at"]:
-            stop(l)
+            stop(l, "the hub's day is over")
+    sweep_borrow()
     b = borrowed()
     if b and time.time() >= b.get("ends_at", 0):
         restore()  # the day is over: the hub ended that lease already
@@ -611,7 +640,7 @@ def sync(link):
     if status == 401:
         # Revoked (or the hub was set up again): every hub token leaves this Mac.
         for l in leases:
-            stop(l)
+            stop(l, "this Mac was revoked on the hub")
             with_suppressed(os.remove, os.path.join(LEASES, f"{l['lease_id']}.json"))
         restore()
         cache.update(at=time.time(), error="This Mac was revoked on the hub: pair it again.", accounts=[],
@@ -685,7 +714,7 @@ def sync(link):
         move_borrow_end(b, grant["ends_at"])
     for l in live:
         if l["lease_id"] in ended:
-            stop(l)
+            stop(l, "the hub ended its lease (Stop, the day's end, or the account removed)")
             with_suppressed(os.remove, os.path.join(LEASES, f"{l['lease_id']}.json"))
         elif grant.get("open") and isinstance(grant.get("ends_at"), (int, float)) \
                 and grant["ends_at"] != l.get("ends_at"):
@@ -710,30 +739,67 @@ def borrowed():
     return read_json(BORROW_FILE)
 
 
-def borrow_sign_in(token, ends_at):
-    """A sign-in as Claude keeps it, made of the setup-token: no refresh token
-    (it can't be refreshed, and needn't be), and it says it ends with the day."""
-    return json.dumps({"claudeAiOauth": {"accessToken": token, "refreshToken": None,
-                                         "expiresAt": int(ends_at * 1000), "scopes": ["user:inference"]}})
+def item_json(raw):
+    try:
+        o = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        return {}
+    return o if isinstance(o, dict) else {}
+
+
+def oauth_of(raw):
+    o = item_json(raw).get("claudeAiOauth")
+    return o if isinstance(o, dict) else None
 
 
 def is_borrowed_sign_in(raw):
     """Claude's own sign-ins always carry a refresh token; a borrowed one never."""
-    try:
-        return not json.loads(raw)["claudeAiOauth"].get("refreshToken")
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return False
+    o = oauth_of(raw)
+    return o is not None and not o.get("refreshToken")
+
+
+def is_own_sign_in(raw):
+    o = oauth_of(raw)
+    return o is not None and bool(o.get("refreshToken"))
+
+
+def borrow_sign_in(token, ends_at, live):
+    """The item as it is (Claude keeps MCP sign-ins in it too) with only the
+    Claude sign-in swapped for one made of the setup-token: no refresh token
+    (it can't be refreshed, and needn't be), and it ends with the day."""
+    o = item_json(live)
+    o["claudeAiOauth"] = {"accessToken": token, "refreshToken": None,
+                          "expiresAt": int(ends_at * 1000), "scopes": ["user:inference"]}
+    return json.dumps(o)
 
 
 def move_borrow_end(b, ends_at):
     """Start day again moved the day's end: so does the borrowed sign-in's."""
     raw = kc_read(CLAUDE_SERVICE)
     if raw and is_borrowed_sign_in(raw):
-        o = json.loads(raw)
+        o = item_json(raw)
         o["claudeAiOauth"]["expiresAt"] = int(ends_at * 1000)
         kc_write(json.dumps(o), CLAUDE_SERVICE, b.get("kc_account", ""))
     b["ends_at"] = ends_at
     write_json(BORROW_FILE, b)
+
+
+def put_back(live, account):
+    """The borrowed Claude sign-in out of the item, the kept one in (or none,
+    when the Mac had none). Other keys (MCP sign-ins made meanwhile) stay.
+    The kept one stays kept: a claude still holding the borrowed sign-in
+    could write it back, and sweep_borrow then puts this one back again."""
+    kept = kc_read(BACKUP_SERVICE, strict=True)
+    o = item_json(live)
+    if kept and oauth_of(kept):
+        o["claudeAiOauth"] = oauth_of(kept)
+        kc_write(json.dumps(o), CLAUDE_SERVICE, account)
+    else:
+        o.pop("claudeAiOauth", None)
+        if o:
+            kc_write(json.dumps(o), CLAUDE_SERVICE, account)
+        else:
+            kc_delete(CLAUDE_SERVICE)
 
 
 def restore(link=None, key=None):
@@ -743,20 +809,18 @@ def restore(link=None, key=None):
     b = borrowed()
     if not b:
         return False
-    live, kept = kc_read(CLAUDE_SERVICE), kc_read(BACKUP_SERVICE)
+    live = kc_read(CLAUDE_SERVICE, strict=True)
     note = None
-    if live and live == kept:
-        kc_delete(BACKUP_SERVICE)  # the borrow never got in place: the Mac's own is there
-    elif live and not is_borrowed_sign_in(live):
+    if is_own_sign_in(live) and oauth_of(live) == oauth_of(kc_read(BACKUP_SERVICE, strict=True)):
+        pass  # the borrow never got in place: the Mac's own is there
+    elif is_own_sign_in(live):
         # Signed in again (/login) while borrowing: that sign-in is the one in
         # use now; the kept one stays aside, for the person to decide.
         note = "A new sign-in was made while borrowing: it stays; the old one is kept in the Keychain item " \
                f"\"{BACKUP_SERVICE}\"."
-    elif kept:
-        kc_write(kept, CLAUDE_SERVICE, b.get("kc_account", ""))
-        kc_delete(BACKUP_SERVICE)
     else:
-        kc_delete(CLAUDE_SERVICE)  # the Mac had no sign-in before the borrow
+        put_back(live, b.get("kc_account", ""))
+    write_json(BORROW_LAST, {"restored": time.time(), "kc_account": b.get("kc_account", "")})
     with_suppressed(os.remove, BORROW_FILE)
     if link and key:
         try:
@@ -766,6 +830,20 @@ def restore(link=None, key=None):
     if note:
         sys.stderr.write(note + "\n")
     return True
+
+
+def sweep_borrow():
+    """No borrow on, yet a borrowed sign-in in Claude's item: a claude that
+    still held it wrote it back after a restore. The Mac's own goes back."""
+    last = read_json(BORROW_LAST)
+    if not last or borrowed():
+        return
+    try:
+        live = kc_read(CLAUDE_SERVICE, strict=True)
+        if is_borrowed_sign_in(live):
+            put_back(live, last.get("kc_account", ""))
+    except Fail:
+        pass  # a locked Keychain: next minute
 
 
 def linked():
@@ -824,18 +902,21 @@ def cmd_use(aid):
         label = next((a.get("label") for a in (read_json(CACHE_FILE) or {}).get("accounts", [])
                       if str(a.get("id")) == aid), None)
         try:
-            live = kc_read(CLAUDE_SERVICE)
+            live = kc_read(CLAUDE_SERVICE, strict=True)
             account = kc_account(CLAUDE_SERVICE)
             # The Mac's own sign-in goes aside first; if that fails, nothing changed.
             # It always replaces what was aside: an older one may hold a refresh
-            # token rotated since. Only a borrowed one in place (a borrow cut
-            # short) leaves the kept one alone: that is the Mac's own.
-            if live and not is_borrowed_sign_in(live):
+            # token rotated since. With no sign-in now, nothing is kept: an old
+            # one must not come back at restore. A borrowed one in place (a
+            # borrow cut short) leaves the kept one alone: that is the Mac's own.
+            if is_own_sign_in(live):
                 kc_write(live, BACKUP_SERVICE, account)
+            elif not is_borrowed_sign_in(live):
+                kc_delete(BACKUP_SERVICE)
             write_json(BORROW_FILE, {"lease_id": out["lease_id"], "account": aid, "label": label,
                                      "ends_at": ends_at, "started": time.time(), "kc_account": account,
                                      "tokens": [0, 0, 0, 0]})
-            kc_write(borrow_sign_in(token, ends_at), CLAUDE_SERVICE, account)
+            kc_write(borrow_sign_in(token, ends_at, live), CLAUDE_SERVICE, account)
         except Exception:
             restore(link, key)
             raise
@@ -869,19 +950,24 @@ def cmd_restore():
 
 # ---------- the agent: sync every minute, for a Mac with no Orcherd
 
-def cmd_service(action):
+def cmd_service(action, python=None):
     if action == "install":
+        from xml.sax.saxutils import escape
+        # The python install.sh found on PATH (a stable link, like Homebrew's
+        # bin/python3), not sys.executable, which can be a versioned path an
+        # upgrade removes.
+        py = python or os.environ.get("STATION_PYTHON") or sys.executable
         logs = os.path.join(HOME, "Library", "Logs", "token-station-client.log")
         text = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{AGENT_LABEL}</string>
-  <key>ProgramArguments</key><array><string>{sys.executable}</string><string>-I</string><string>{os.path.abspath(__file__)}</string><string>sync</string></array>
+  <key>ProgramArguments</key><array><string>{escape(py)}</string><string>-I</string><string>{escape(os.path.abspath(__file__))}</string><string>sync</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>{logs}</string>
-  <key>StandardErrorPath</key><string>{logs}</string>
+  <key>StandardOutPath</key><string>{escape(logs)}</string>
+  <key>StandardErrorPath</key><string>{escape(logs)}</string>
 </dict></plist>
 """
         os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
@@ -890,13 +976,23 @@ def cmd_service(action):
     elif action != "remove":
         raise Fail("tokenstation.py service install | remove")
     uid = os.getuid()
+    target = f"gui/{uid}/{AGENT_LABEL}"
     if not TEST_KEY_FILE:  # tests: the plist only, never a real agent
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{AGENT_LABEL}"], capture_output=True, timeout=20)
+        subprocess.run(["launchctl", "bootout", target], capture_output=True, timeout=20)
+        # bootout returns before the agent is gone; bootstrap before that fails (5).
+        for _ in range(50):
+            if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=10).returncode != 0:
+                break
+            time.sleep(0.1)
     if action == "remove":
         with_suppressed(os.remove, AGENT_PLIST)
     elif not TEST_KEY_FILE:
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST], capture_output=True, text=True, timeout=20)
-        if r.returncode != 0:
+        for attempt in range(5):
+            r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST], capture_output=True, text=True, timeout=20)
+            if r.returncode == 0:
+                break
+            time.sleep(1)
+        else:
             raise Fail(f"launchctl could not start the agent: {r.stderr.strip()[:120]}")
 
 
@@ -916,6 +1012,14 @@ def cmd_uninstall():
                     request(link, "POST", "/api/v1/release", {"lease_id": l["lease_id"]}, key=key)
                 except Fail:
                     pass
+        # The kept copy is only needed while a borrowed sign-in could come back.
+        try:
+            kept = kc_read(BACKUP_SERVICE, strict=True)
+            if kept and oauth_of(kept) == oauth_of(kc_read(CLAUDE_SERVICE, strict=True)):
+                kc_delete(BACKUP_SERVICE)
+        except Fail:
+            pass
+        with_suppressed(os.remove, BORROW_LAST)
     cmd_service("remove")
     cmd_forget()
     with_suppressed(os.remove, LOCK_FILE)
@@ -959,8 +1063,8 @@ def main(argv):
             cmd_use(rest[0])
         elif cmd == "restore" and not rest:
             cmd_restore()
-        elif cmd == "service" and len(rest) == 1:
-            cmd_service(rest[0])
+        elif cmd == "service" and len(rest) in (1, 2):
+            cmd_service(*rest)
         elif cmd == "uninstall" and not rest:
             cmd_uninstall()
         else:
