@@ -24,7 +24,11 @@ read). Each hub account gets its own Claude folder,
 `projects`, so its transcripts, and so its token use, are its own.
 
 The token goes from the hub straight into the env of `claude` (os.execve):
-never argv, never a file. The machine key lives in the Keychain and reaches
+never argv, never a file. So it leaves this Mac when that claude ends, and
+Orcherd ends it (and what it started, which has its env) when the lease
+ends: at the day's end (even with the hub out of reach), when the hub says
+so (Stop on its Live page, account deleted) and when the hub no longer
+knows this Mac (revoked). The machine key lives in the Keychain and reaches
 curl on stdin. The hub's cert is pinned (curl --pinnedpubkey) from pairing on.
 """
 import base64
@@ -33,6 +37,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -357,7 +362,8 @@ def cmd_run(aid, args):
     token = out["token"]
     write_json(os.path.join(LEASES, f"{out['lease_id']}.json"),
                {"lease_id": out["lease_id"], "account": aid, "pid": os.getpid(), "folder": folder,
-                "started": time.time(), "pane": pane, "cwd": cwd, "tokens": [0, 0, 0, 0]})
+                "started": time.time(), "ends_at": out.get("ends_at"), "pane": pane, "cwd": cwd,
+                "tokens": [0, 0, 0, 0]})
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     env.update(CLAUDE_CONFIG_DIR=folder, CLAUDE_CODE_OAUTH_TOKEN=token)
     # The same process becomes claude: the lease file's pid is claude's pid.
@@ -372,6 +378,59 @@ def alive(lease):
     r = subprocess.run(["ps", "-E", "-ww", "-o", "command=", "-p", str(lease["pid"])],
                        capture_output=True, text=True, timeout=10)
     return r.returncode == 0 and f"CLAUDE_CONFIG_DIR={lease['folder']}" in r.stdout
+
+
+def running(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # there, but not ours to signal
+    return True
+
+
+def tree(pid):
+    """pid and every process under it: claude's tools, shells and MCP servers
+    inherit its env, token included, so they go with it."""
+    r = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10)
+    kids = {}
+    for line in r.stdout.splitlines():
+        try:
+            p, pp = (int(x) for x in line.split())
+        except ValueError:
+            continue
+        kids.setdefault(pp, []).append(p)
+    out, todo = [], [pid]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo += kids.get(p, [])
+    return out
+
+
+def stop(lease):
+    """Ends the lease's claude and everything under it, so its token is gone
+    from this Mac. The chat stays on disk: Restart goes on with it."""
+    if not alive(lease):
+        return
+    pids = tree(lease["pid"])
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p in pids:
+            with_suppressed(os.kill, p, sig)
+        deadline = time.time() + 5
+        while time.time() < deadline and any(running(p) for p in pids):
+            time.sleep(0.2)
+        pids = [p for p in pids if running(p)]
+        if not pids:
+            return
+
+
+def read_leases():
+    if not os.path.isdir(LEASES):
+        return []
+    return [l for l in (read_json(os.path.join(LEASES, f)) for f in sorted(os.listdir(LEASES))
+                        if f.endswith(".json")) if l]
 
 
 def iso(ts):
@@ -459,7 +518,14 @@ def sync(link):
     """One tick: the hub's accounts (for ACCOUNTS), then a heartbeat with every
     pane still running on a hub account, the tokens their chats spent, a
     refused token, and this Mac's fuel for the same Claude accounts. A pane
-    that ended is released."""
+    that ended is released. A lease that ended, here or on the hub, stops its
+    pane."""
+    leases = read_leases()
+    # The day's end holds even when the hub is out of reach: the pane stops,
+    # and is released below once the hub answers.
+    for l in leases:
+        if isinstance(l.get("ends_at"), (int, float)) and time.time() >= l["ends_at"]:
+            stop(l)
     key = kc_read()
     cache = read_json(CACHE_FILE) or {}
     if not key:
@@ -473,6 +539,10 @@ def sync(link):
         write_json(CACHE_FILE, cache)
         return
     if status == 401:
+        # Revoked (or the hub was set up again): every hub token leaves this Mac.
+        for l in leases:
+            stop(l)
+            with_suppressed(os.remove, os.path.join(LEASES, f"{l['lease_id']}.json"))
         cache.update(at=time.time(), error="This Mac was revoked on the hub: pair it again.", accounts=[],
                      grant={"open": False, "ends_at": None})
         write_json(CACHE_FILE, cache)
@@ -485,8 +555,6 @@ def sync(link):
     write_json(CACHE_FILE, {"at": time.time(), "error": None, "hub_name": out.get("hub_name"),
                             "grant": out.get("grant"), "accounts": accounts})
 
-    leases = [l for l in (read_json(os.path.join(LEASES, f)) for f in sorted(os.listdir(LEASES))
-                          if f.endswith(".json")) if l] if os.path.isdir(LEASES) else []
     gone, live = [], []
     for l in leases:
         (live if alive(l) else gone).append(l)
@@ -526,8 +594,19 @@ def sync(link):
                               {"leases": items, "fuel": local_fuel(emails)}, key=key)
     except Fail:
         return
-    for lid in out.get("ended", []) if status == 200 else []:
-        with_suppressed(os.remove, os.path.join(LEASES, f"{lid}.json"))
+    if status != 200:
+        return
+    ended = set(out.get("ended", []))
+    grant = out.get("grant") or {}
+    for l in live:
+        if l["lease_id"] in ended:
+            stop(l)
+            with_suppressed(os.remove, os.path.join(LEASES, f"{l['lease_id']}.json"))
+        elif grant.get("open") and isinstance(grant.get("ends_at"), (int, float)) \
+                and grant["ends_at"] != l.get("ends_at"):
+            # Start day again while it is open moves its end: so do the leases'.
+            l["ends_at"] = grant["ends_at"]
+            write_json(os.path.join(LEASES, f"{l['lease_id']}.json"), l)
 
 
 def cmd_sync():

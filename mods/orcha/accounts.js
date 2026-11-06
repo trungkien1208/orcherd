@@ -190,11 +190,12 @@ export default class Accounts {
           .items_center()
           .child(div().text_size(11.5).text_color(k.muted).child("Move this chat:"))
           .when(!this.keep?.why && !isStation(a), (el) => el.child(button(k, `keep-${a.id}`, this.keep?.others ? `KEEP RUNNING · ${this.keep.others + 1} CHATS` : "KEEP RUNNING", (_e, cx) => this.switchTo(a, "keep", cx), { small: true, primary: true })))
-          .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: Boolean(this.keep?.why) }))
+          .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: Boolean(this.keep?.why) || isStation(a) }))
           .child(button(k, `pane-${a.id}`, "NEW PANE", (_e, cx) => this.switchTo(a, "new_pane", cx), { small: true }))
       : null;
     const keepNote =
       this.choosing !== a.id ? null
+      : isStation(a) ? div().text_size(11).text_color(k.dim).child("No keep running on a hub account: its token lives only in claude's env, so it needs a restart. Restart goes on with this chat.")
       : this.keep?.why ? div().text_size(11).text_color(k.dim).child(`No keep running: ${this.keep.why}`)
       : this.keep?.others ? div().text_size(11).text_color(k.dim).child(`Keep running moves the ${this.keep.others + 1} chats on this folder together, no restart. Restart moves only this one.`)
       : null;
