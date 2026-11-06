@@ -20,7 +20,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, notify, setShared } from "herdr";
-import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
 import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable } from "./ui.js";
 
 export default class Accounts {
@@ -49,6 +49,7 @@ export default class Accounts {
     cx.spawn(async (cx) => {
       const { list, active } = await readAccounts();
       this.list = list;
+      this.hasHub = list.some(isStation);
       // What IN USE means: the account of the agent in front of you.
       const from = focusedAgent();
       const key = from?.program?.key ?? "claude";
@@ -70,8 +71,11 @@ export default class Accounts {
   best() {
     let best = null;
     let most = -1;
+    const using = this.list.find((a) => a.id === this.using);
     for (const a of this.list) {
-      if (a.kind !== "claude") continue;
+      if (a.kind !== "claude" || a.why) continue;
+      // With a hub: the same Claude account under the other source is one fuel, no way out.
+      if (this.hasHub && using && a.id !== using.id && sameClaude(a, using)) continue;
       const fuel = Math.min(fuelLeft(a.limits.session) ?? 100, fuelLeft(a.limits.weekly) ?? 100);
       if (fuel > most) {
         most = fuel;
@@ -111,8 +115,8 @@ export default class Accounts {
     if (!from) return this.withoutAgent(account, cx);
     const claudeToClaude = account.kind === "claude" && from.program?.key?.includes("claude");
     let way = claudeToClaude ? how ?? (this.mode === "ask" ? null : this.mode) : "new_pane";
-    // Keep running can't here: ask instead, with why.
-    if (way === "keep" && this.keep?.why) way = null;
+    // Keep running can't here (or onto a hub account): ask instead, with why.
+    if (way === "keep" && (this.keep?.why || isStation(account))) way = null;
     if (!way) {
       this.choosing = this.choosing === account.id ? null : account.id;
       cx.notify();
@@ -185,7 +189,7 @@ export default class Accounts {
           .pt(4)
           .items_center()
           .child(div().text_size(11.5).text_color(k.muted).child("Move this chat:"))
-          .when(!this.keep?.why, (el) => el.child(button(k, `keep-${a.id}`, this.keep?.others ? `KEEP RUNNING · ${this.keep.others + 1} CHATS` : "KEEP RUNNING", (_e, cx) => this.switchTo(a, "keep", cx), { small: true, primary: true })))
+          .when(!this.keep?.why && !isStation(a), (el) => el.child(button(k, `keep-${a.id}`, this.keep?.others ? `KEEP RUNNING · ${this.keep.others + 1} CHATS` : "KEEP RUNNING", (_e, cx) => this.switchTo(a, "keep", cx), { small: true, primary: true })))
           .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: Boolean(this.keep?.why) }))
           .child(button(k, `pane-${a.id}`, "NEW PANE", (_e, cx) => this.switchTo(a, "new_pane", cx), { small: true }))
       : null;
@@ -224,8 +228,11 @@ export default class Accounts {
               .gap(6)
               .items_center()
               .child(div().font_black().text_color(k.ink).child(a.label ?? a.id))
-              .when(isBest, (el) => el.child(chip(k, "BEST", k.green))),
+              .when(isBest, (el) => el.child(chip(k, "BEST", k.green)))
+              // HUB / LOCAL only once a hub is paired: before that, nothing new shows.
+              .when(this.hasHub && a.kind === "claude", (el) => el.child(chip(k, isStation(a) ? "HUB" : "LOCAL", isStation(a) ? k.blue : k.paper))),
           )
+          .when(Boolean(a.why), (el) => el.child(div().text_size(11).text_color(readable(k, k.red)).child(`Can't start now: ${a.why}`)))
           .when(Boolean(a.email), (el) => el.child(div().text_size(11.5).text_color(k.dim).child(a.email)))
           .when(Boolean(a.limits.note), (el) => el.child(div().text_size(11).text_color(k.dim).child(a.limits.note)))
           .children(gauges.length || token?.idle ? gauges : [div().text_size(11.5).text_color(a.limits.error ? readable(k, k.red) : k.dim).child(a.limits.error ?? "no fuel read yet: sign in, then refresh")])

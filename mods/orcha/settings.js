@@ -9,7 +9,7 @@ import { RULES, SKILLS } from "./catalog.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
 import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate } from "./version.js";
-import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget } from "./accounts-data.js";
 
 // Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
 // is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
@@ -132,6 +132,10 @@ export default class Settings {
     this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
     this.accountInput = InputState.new({ placeholder: "name, like personal or work" });
     this.accountInput.on("submit", (_e, cx) => this.addAccount(cx));
+    this.stationUrlInput = InputState.new({ placeholder: "hub address, like kien-mac.local:8787" });
+    this.stationUrlInput.on("submit", (_e, cx) => this.stationCheck(cx));
+    this.stationCodeInput = InputState.new({ placeholder: "6-digit code" });
+    this.stationCodeInput.on("submit", (_e, cx) => this.stationPairGo(cx));
     this.renameInput = InputState.new();
     this.renameInput.on("focus", (_e, cx) => { this.renameFocused = true; cx.notify(); });
     this.renameInput.on("blur", (_e, cx) => { this.renameFocused = false; cx.notify(); });
@@ -1248,6 +1252,7 @@ export default class Settings {
       const { list, main } = await readAccounts();
       this.orcha.accounts = list;
       this.orcha.active = main;
+      this.orcha.station = await stationStatus();
       cx.notify();
     });
   }
@@ -1273,13 +1278,16 @@ export default class Settings {
     const out = v_flex()
       .w_full()
       .child(this.heading(t, "Accounts"))
-      .child(div().pb(6).text_size(12.5).text_color(t.dim).child("The default account is the one new Claude chats start on, and chats started the usual way follow it. To move just one chat, click into it and use 👤 in the header. Fuel is what is left of each plan, read by orcha."));
+      .child(div().pb(6).text_size(12.5).text_color(t.dim).child("The default account is the one new Claude chats start on, and chats started the usual way follow it. To move just one chat, click into it and use 👤 in the header. Fuel is what is left of each plan, read by orcha."))
+      .child(this.stationSection(t));
     for (const a of this.orcha.accounts ?? []) {
       const inUse = a.kind === "claude" && a.id === this.orcha.active;
       const gauges = [fuelGauge(k, "5H", a.limits.session), fuelGauge(k, "WEEK", a.limits.weekly), fuelGauge(k, "MONTH", a.limits.monthly)].filter(Boolean);
       const token = tokenState(a);
       const control =
-        needsSignIn(a, gauges)
+        isStation(a)
+          ? div().text_size(12.5).text_color(a.why ? t.blocked : t.dim).child(a.why ?? "from the hub")
+          : needsSignIn(a, gauges)
           ? this.button(t, `acc-sign-${a.id}`, "Sign in", () => { closeOverlay(props()?.overlay); signIn(a.id); })
           : a.kind !== "claude"
           ? div()
@@ -1360,6 +1368,97 @@ export default class Settings {
           }),
         )),
     );
+  }
+
+  // orcha: Token Station ---------------------------------------------------
+  // Your own hub of Claude accounts on the LAN (bin/tokenstation.py). Two
+  // steps to pair: read the hub's cert and compare it with the hub's page,
+  // then the 6-digit code. Nothing about it runs before that.
+
+  stationSection(t) {
+    const st = this.orcha.station;
+    const busy = this.orcha.busy.station;
+    const field = (input) => Input.new(input).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground);
+    const text = (s, color = t.dim) => div().text_size(12.5).text_color(color).child(s);
+    const box = v_flex().w_full().gap(6).py(12).border_b(1).border_color(t.border)
+      .child(div().text_size(14).text_color(t.foreground).child("Token Station"));
+    if (!st) return box.child(text("…"));
+    if (st.paired) {
+      const state = st.error ?? (st.grant?.open ? "The hub's day is on: hub accounts can start here." : "The hub's day isn't started: hub accounts wait for Start day on the hub.");
+      return box
+        .child(text(`Paired with tokenstation@${st.hub_name} · ${st.url}`, t.foreground))
+        .child(text(`Cert ${st.check}. Hub accounts show above with HUB; they start in their own folder, on the hub's token.`))
+        .child(text(state, st.error ? t.blocked : t.dim))
+        .child(h_flex().gap(8).pt(4)
+          .child(busy ? text(busy) : this.button(t, "station-sync", "Sync now", (_e, cx) => this.stationSync(cx)))
+          .child(this.button(t, "station-forget", this.orcha.stationConfirm ? "Sure? Unpair" : "Unpair this Mac", (_e, cx) => this.stationUnpair(cx))));
+    }
+    const probe = this.orcha.stationProbe;
+    box.child(text("Use the Claude accounts of your own Token Station hub on this Mac. On the hub's Machines page press Add machine, then:"));
+    if (!probe) {
+      return box.child(h_flex().gap(8).pt(4).child(field(this.stationUrlInput))
+        .child(busy ? text(busy) : this.button(t, "station-check", "Check hub", (_e, cx) => this.stationCheck(cx))));
+    }
+    return box
+      .child(text(`The hub at ${probe.url} shows cert ${probe.check}.`, t.foreground))
+      .child(text("Pair only if the hub's Machines page shows the same. If it differs, stop: something is between this Mac and the hub.", t.blocked))
+      .child(h_flex().gap(8).pt(4).child(field(this.stationCodeInput))
+        .child(busy ? text(busy) : this.button(t, "station-pair", "Pair", (_e, cx) => this.stationPairGo(cx)))
+        .child(this.button(t, "station-cancel", "Cancel", (_e, cx) => { this.orcha.stationProbe = null; cx.notify(); })));
+  }
+
+  stationRun(cx, label, work) {
+    if (this.orcha.busy.station) return;
+    this.orcha.busy.station = label;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      await work();
+      delete this.orcha.busy.station;
+      this.loadAccounts(cx);
+      setShared("orcha.fuelRev", Date.now());
+    });
+  }
+
+  stationCheck(cx) {
+    this.stationRun(cx, "checking…", async () => {
+      const probe = await stationProbe(this.stationUrlInput.value());
+      if (probe.error) notify({ title: "No hub there", body: probe.error, level: "error" });
+      else {
+        this.orcha.stationProbe = probe;
+        this.stationCodeInput.focus();
+      }
+    });
+  }
+
+  stationPairGo(cx) {
+    const probe = this.orcha.stationProbe;
+    if (!probe) return;
+    this.stationRun(cx, "pairing…", async () => {
+      const failed = await stationPair(probe.url, this.stationCodeInput.value(), probe.pin);
+      if (failed) notify({ title: "Not paired", body: failed, level: "error" });
+      else {
+        this.orcha.stationProbe = null;
+        this.stationCodeInput.set_value("");
+        notify({ title: "Paired with the hub ⚡", body: "Its accounts show in ACCOUNTS with HUB.", level: "success", timeout: 6000 });
+      }
+    });
+  }
+
+  stationSync(cx) {
+    this.stationRun(cx, "syncing…", () => refreshFuel(true));
+  }
+
+  stationUnpair(cx) {
+    if (!this.orcha.stationConfirm) {
+      this.orcha.stationConfirm = true;
+      cx.notify();
+      return;
+    }
+    this.orcha.stationConfirm = false;
+    this.stationRun(cx, "unpairing…", async () => {
+      await stationForget();
+      notify({ title: "Unpaired", body: "Hub accounts are gone from this Mac; their chats stay in ~/.config/orcherd/station. Revoke this Mac on the hub too.", level: "success", timeout: 8000 });
+    });
   }
 
   // Claude · Codex · Cursor: which agent the new account is for.

@@ -8,7 +8,7 @@
 
 import { agents, notify, setShared } from "herdr";
 import { fuelLeft, agentFacts } from "./ui.js";
-import { readAccounts, readHandoff, keepRunningOn, handOff, restartOn, askForChecklist, focusedAgent, claudeAccountOf } from "./accounts-data.js";
+import { readAccounts, readHandoff, keepRunningOn, handOff, restartOn, askForChecklist, focusedAgent, claudeAccountOf, isStation, sameClaude } from "./accounts-data.js";
 
 // The tighter of an account's limits, and when that window resets.
 function fuel(account) {
@@ -42,14 +42,17 @@ export default class HandoffWatch {
         return true;
       };
       const label = account.label ?? account.id;
-      const others = list.filter((a) => a.kind === "claude" && a.id !== account.id).map((a) => ({ a, f: fuel(a) })).filter((x) => x.f && x.f.left > now.left);
+      // Not the same Claude account under another source (one fuel), nor a hub account that can't start now.
+      const hub = list.some(isStation);
+      const others = list.filter((a) => a.kind === "claude" && a.id !== account.id && !(hub && sameClaude(a, account)) && !a.why).map((a) => ({ a, f: fuel(a) })).filter((x) => x.f && x.f.left > now.left);
       const best = others.sort((x, y) => y.f.left - x.f.left)[0]?.a ?? null;
 
       if (h.auto_handoff_percent && now.left < h.auto_handoff_percent && best) {
         const from = focusedAgent();
         const between = from && agents().find((a) => a.pane === from.pane)?.status !== "working";
         if (between && once("auto")) {
-          const way = h.switch_mode === "restart" ? "restart" : h.switch_mode === "new_pane" ? "new_pane" : "keep";
+          // Keep running can't carry a chat onto (or off) a hub account: restart does.
+          const way = h.switch_mode === "new_pane" ? "new_pane" : h.switch_mode === "restart" || isStation(best) || isStation(account) ? "restart" : "keep";
           const failed = way === "keep" ? await keepRunningOn(best, from) : way === "restart" ? await restartOn(best) : await handOff(best, { checklistFile: h.checklist_file });
           notify(failed ? { title: "orcha could not switch accounts", body: failed, level: "error" } : { title: `${label} is almost empty: moved to ${best.label ?? best.id}`, level: "success", timeout: 8000 });
         }

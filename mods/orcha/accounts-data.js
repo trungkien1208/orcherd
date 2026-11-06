@@ -44,7 +44,88 @@ export async function readAccounts() {
     const cache = cacheFile(`limits/${account.id}`);
     list.push({ ...account, limits: (await readJson(`${cache}.json`)) ?? {}, token: await readJson(`${cache}.token.json`) });
   }
+  list.push(...(await readStationAccounts(list)));
   return { list, active, main };
+}
+
+// Token Station ----------------------------------------------------------
+// Hub accounts (bin/tokenstation.py, repo token-station) show beside the
+// local ones once this Mac is paired. Before that none of this runs: no
+// file, no network, every path below as it always was.
+
+const STATION = () => script("tokenstation.py");
+const STATION_DIR = () => `${home()}/.config/orcherd/station/`;
+/** A hub account (source "station"), not one signed in on this Mac. */
+export const isStation = (a) => a?.source === "station";
+const stationIdOf = (folder) => folder.slice(STATION_DIR().length).split("/")[0];
+/** The same Claude account (one fuel), by email: a hub and a local one can be. */
+export const sameClaude = (a, b) => Boolean(a?.email) && a.email.toLowerCase() === (b?.email ?? "").toLowerCase();
+
+async function stationLinked() {
+  return Boolean(await readJson(configFile("station.json")));
+}
+
+/** The hub's accounts from tokenstation.py's cache, shaped like local ones.
+ *  `why`: why a pane can't start on it now (null when it can). */
+async function readStationAccounts(local) {
+  const link = await readJson(configFile("station.json"));
+  if (!link) return [];
+  const cache = (await readJson(cacheFile("station.json"))) ?? {};
+  const hub = cache.hub_name ?? link.hub_name ?? "hub";
+  return (cache.accounts ?? []).map((h) => {
+    const twin = local.find((a) => a.kind === "claude" && sameClaude(a, h));
+    const why = cache.error
+      ?? (!h.enabled ? "disabled on the hub"
+        : h.needs_renew ? "needs renew on the hub"
+        : !cache.grant?.open ? "the hub's day isn't started"
+        : h.max_leases != null && h.live_leases >= h.max_leases ? `lease limit reached (${h.live_leases}/${h.max_leases})`
+        : null);
+    const note = `tokenstation@${hub}${twin ? ` · same Claude account as ${twin.label ?? twin.id}` : ""}`;
+    return {
+      id: `station-${h.id}`, stationId: String(h.id), kind: "claude", source: "station", hub,
+      label: h.label, email: h.email ?? "", dir: `~/.config/orcherd/station/${h.id}`,
+      limits: { ...(h.fuel ?? {}), note }, token: null, why,
+    };
+  });
+}
+
+/** tokenstation.py status: { paired, url, hub_name, check, synced_at, error, grant }. */
+export async function stationStatus() {
+  const r = await exec("python3", ["-I", STATION(), "status"]);
+  try {
+    return r.code === 0 ? JSON.parse(r.stdout) : { paired: false };
+  } catch {
+    return { paired: false };
+  }
+}
+
+/** The cert a hub shows now: { url, pin, check }, or { error }. */
+export async function stationProbe(url) {
+  const r = await exec("python3", ["-I", STATION(), "probe", url]);
+  try {
+    return r.code === 0 ? JSON.parse(r.stdout) : { error: lastLine(r, "No answer from the hub.") };
+  } catch {
+    return { error: "The hub's answer could not be read." };
+  }
+}
+
+/** Pairs this Mac. The code goes through a file in ~/.cache/orcherd (0700),
+ *  which the script deletes: never argv. Null, or why it failed. */
+export async function stationPair(url, code, pin) {
+  await exec("mkdir", ["-p", "-m", "700", cacheFile("")]);
+  const file = cacheFile(`station-pair-${Date.now()}.json`);
+  try {
+    await writeTextFile(file, JSON.stringify({ url, code, pin }), null);
+  } catch {
+    return "Could not write to ~/.cache/orcherd.";
+  }
+  const r = await exec("python3", ["-I", STATION(), "pair", file]);
+  return r.code === 0 ? null : lastLine(r, "tokenstation.py failed");
+}
+
+/** Unpairs this Mac (the hub accounts' folders and their chats stay). */
+export async function stationForget() {
+  await exec("python3", ["-I", STATION(), "forget"]);
 }
 
 const span = (ms) => {
@@ -69,7 +150,7 @@ export function tokenState(a) {
 }
 
 /** Whether to offer SIGN IN: the sign-in is missing, or (no token known) no fuel could be read. */
-export const needsSignIn = (a, gauges) => tokenState(a)?.signIn ?? !gauges.length;
+export const needsSignIn = (a, gauges) => (isStation(a) ? false : tokenState(a)?.signIn ?? !gauges.length);
 
 /** Puts `id` in the main folder: every chat there moves to it within half a
  *  minute, without a restart. Null, or why it failed. */
@@ -81,6 +162,7 @@ async function activateAccount(id) {
 /** Settings › Make default: new chats start on `id`, and so do the ones on
  *  the main folder (no longer borrowing). Null, or why it failed. */
 export async function makeDefault(id) {
+  if (id.startsWith("station-")) return "A hub account can't be the default: the default lives in ~/.claude's sign-in, and a hub account has none here.";
   const failed = await activateAccount(id);
   if (failed) return failed;
   try {
@@ -135,6 +217,7 @@ export function openKeychainAccess() {
  *  last two minutes are skipped, unless `fresh` (someone asked for it). */
 export async function refreshFuel(fresh = false) {
   await exec("python3", ["-I", LIMITS(), "json", ...(fresh ? ["fresh"] : [])]);
+  if (await stationLinked()) await exec("python3", ["-I", STATION(), "sync"]);
 }
 
 // The config folder each terminal's Claude reads (CLAUDE_CONFIG_DIR, from its
@@ -174,7 +257,9 @@ export async function readPaneAccounts() {
   if (!claudes.length) return {};
   const folders = await configFolders(claudes.map((p) => p.terminal));
   const unique = [...new Set(folders)];
-  const holders = await Promise.all(unique.map((f) => exec("python3", ["-I", LIMITS(), "whoami", f]).then((r) => (r.code === 0 ? r.stdout.trim() || null : null))));
+  const holders = await Promise.all(unique.map((f) => (f.startsWith(STATION_DIR())
+    ? Promise.resolve(`station-${stationIdOf(f)}`)
+    : exec("python3", ["-I", LIMITS(), "whoami", f]).then((r) => (r.code === 0 ? r.stdout.trim() || null : null)))));
   const holderOf = new Map(unique.map((f, i) => [f, holders[i]]));
   const { list, main } = await readAccounts();
   const out = {};
@@ -193,7 +278,9 @@ export async function readPaneAccounts() {
 
 /** The account a terminal's Claude runs on, or null. */
 export async function claudeAccountOf(terminal) {
-  const r = await exec("python3", ["-I", LIMITS(), "whoami", await configFolder(terminal)]);
+  const folder = await configFolder(terminal);
+  if (folder.startsWith(STATION_DIR())) return `station-${stationIdOf(folder)}`;
+  const r = await exec("python3", ["-I", LIMITS(), "whoami", folder]);
   return r.code === 0 ? r.stdout.trim() || null : null;
 }
 
@@ -205,6 +292,7 @@ export async function keepInfo(from) {
   if (!from?.terminal) return { why: "Click into an agent first.", others: 0 };
   const claudes = panes().filter((p) => p.terminal && p.terminal !== from.terminal && p.program?.key?.includes("claude"));
   const [folder, ...folders] = await configFolders([from.terminal, ...claudes.map((p) => p.terminal)]);
+  if (folder.startsWith(STATION_DIR())) return { why: "this chat runs on a hub account, whose token lives in its process: restart it onto another account instead", others: 0 };
   return { why: null, others: folders.filter((f) => f === folder).length };
 }
 
@@ -212,6 +300,7 @@ export async function keepInfo(from) {
  *  again within half a minute, and FUEL shows it BORROWED. Chats sharing its
  *  folder move with it (keepInfo). Null, or why not. */
 export async function keepRunningOn(account, from) {
+  if (isStation(account)) return "A running chat can't borrow a hub account: its token has to be in the chat's process from the start. Restart the chat onto it, or open a new pane.";
   const { why } = await keepInfo(from);
   if (why) return why;
   const folder = await configFolder(from.terminal);
@@ -227,6 +316,11 @@ export async function keepRunningOn(account, from) {
 /** A new chat on `account`, in a new tab: Claude in the account's own folder,
  *  Codex and Cursor as they are. Null, or why not. */
 export async function startOn(account) {
+  if (isStation(account)) {
+    if (account.why) return `${account.label}: ${account.why}.`;
+    run("tab.new", { argv: ["python3", "-I", STATION(), "run", account.stationId] });
+    return null;
+  }
   if (account.kind !== "claude") {
     const argv = AGENT_RUN[account.kind];
     if (!argv) return `orcha can't start ${account.kind}.`;
@@ -406,6 +500,7 @@ function claudeDir(account) {
 export async function handOff(account, { checklistFile = HANDOFF_DEFAULTS.checklist_file } = {}) {
   const from = focusedAgent();
   if (!from) return "Click into an agent first: its chat is what moves.";
+  if (isStation(account) && account.why) return `${account.label}: ${account.why}.`;
   const command = AGENT_RUN[account.kind];
   if (!command) return `orcha can't hand a chat to ${account.kind}.`;
   const notes = await buildNotes(from, checklistFile);
@@ -418,12 +513,16 @@ export async function handOff(account, { checklistFile = HANDOFF_DEFAULTS.checkl
     return "The notes could not be saved.";
   }
   let argv = [command, `Read the hand-off notes in ${path}, sum up where the work stands, then wait for my go.`];
-  const dir = account.kind === "claude" ? claudeDir(account) : null;
-  const taken = account.kind === "claude" ? await mainFolderTaken(account, dir) : null;
-  if (taken) return taken;
-  if (dir) {
-    await exec("python3", ["-I", LIMITS(), "link", account.id]);
-    argv = ["env", `CLAUDE_CONFIG_DIR=${dir}`, ...argv];
+  if (isStation(account)) {
+    argv = ["python3", "-I", STATION(), "run", account.stationId, ...argv.slice(1)];
+  } else {
+    const dir = account.kind === "claude" ? claudeDir(account) : null;
+    const taken = account.kind === "claude" ? await mainFolderTaken(account, dir) : null;
+    if (taken) return taken;
+    if (dir) {
+      await exec("python3", ["-I", LIMITS(), "link", account.id]);
+      argv = ["env", `CLAUDE_CONFIG_DIR=${dir}`, ...argv];
+    }
   }
   run("pane.split", { direction: "right", pane: from.pane, argv });
   return null;
@@ -437,6 +536,15 @@ export async function restartOn(account) {
   const from = focusedAgent();
   if (!from?.terminal) return "Click into an agent first.";
   if (account.kind !== "claude" || !from.program?.key?.includes("claude")) return "Restarting on another account works from Claude to Claude.";
+  // A hub folder sees only its own chats: the one in this pane is linked
+  // across first, so --continue goes on with it. Local to local needs nothing.
+  const fromFolder = await configFolder(from.terminal);
+  const adopt = (to) => exec("python3", ["-I", STATION(), "adopt", fromFolder, to, from.cwd ?? home()]);
+  if (isStation(account)) {
+    if (account.why) return `${account.label}: ${account.why}.`;
+    await adopt(`${STATION_DIR()}${account.stationId}`);
+    return typeContinue(from, `python3 -I '${STATION().replace(/'/g, "'\\''")}' run ${account.stationId} --continue`);
+  }
   const dir = claudeDir(account);
   const owner = await exec("python3", ["-I", LIMITS(), "whoami", dir ?? "-"]);
   const holder = owner.stdout.trim();
@@ -449,14 +557,19 @@ export async function restartOn(account) {
     return `${name}'s folder holds ${other} now. Keep the chat running on ${name} instead.`;
   }
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
+  if (fromFolder.startsWith(STATION_DIR())) await adopt(dir ?? "-");
   // Typed into the pane's shell: the folder quoted, so a space or a quote in it stays a name.
   const env = dir ? `env CLAUDE_CONFIG_DIR='${dir.replace(/'/g, "'\\''")}'` : "env -u CLAUDE_CONFIG_DIR";
-  // Ctrl+C twice leaves Claude Code; then the shell continues the chat.
+  return typeContinue(from, `${env} claude --continue`);
+}
+
+/** Ctrl+C twice leaves Claude Code; then the shell runs `command`. Null, or why not. */
+async function typeContinue(from, command) {
   await hc(["keys", from.terminal, "ctrl+c"]);
   await pause(0.4);
   await hc(["keys", from.terminal, "ctrl+c"]);
   await pause(1);
-  const r = await hc(["send", from.terminal, `${env} claude --continue`]);
+  const r = await hc(["send", from.terminal, command]);
   return r.code === 0 ? null : lastLine(r, "hc send failed");
 }
 
