@@ -27,6 +27,8 @@ export default class Accounts {
   constructor(cx) {
     this.list = [];
     this.at = 0;
+    this.tab = "local";
+    this.tabChosen = false;
     this.busy = null;
     this.choosing = null; // account id whose hand-off choices show
     this.adding = false;
@@ -55,16 +57,34 @@ export default class Accounts {
       const key = from?.program?.key ?? "claude";
       if (key.includes("claude")) this.using = (from?.terminal && (await claudeAccountOf(from.terminal))) || active;
       else this.using = list.find((a) => key.includes(a.kind))?.id ?? null;
+      if (this.hasHub && !this.tabChosen) {
+        this.tab = isStation(list.find((a) => a.id === this.using)) ? "hub" : "local";
+        this.tabChosen = true;
+      }
       // What keep running would do: why not, or how many other chats move with it.
       this.keep = from && key.includes("claude") ? await keepInfo(from) : { why: null, others: 0 };
       // Keep running writes the Keychain: it waits for it.
       if (list.some((a) => a.kind === "claude")) this.keychain = await readKeychain();
       const blocked = keychainBlocks(this.keychain);
       if (blocked && !this.keep.why) this.keep = { ...this.keep, why: blocked };
-      const current = list.findIndex((a) => a.id === this.using);
+      const current = this.visible().findIndex((a) => a.id === this.using);
       if (current >= 0 && this.at === 0) this.at = current;
+      if (this.at >= this.visible().length) this.at = Math.max(0, this.visible().length - 1);
       cx.notify();
     });
+  }
+
+  visible() {
+    return this.hasHub ? this.list.filter((a) => isStation(a) === (this.tab === "hub")) : this.list;
+  }
+
+  selectTab(tab, cx) {
+    this.tab = tab;
+    this.tabChosen = true;
+    this.at = 0;
+    this.choosing = null;
+    this.adding = false;
+    cx.notify();
   }
 
   // The Claude account with the most fuel left, by its tighter limit.
@@ -72,7 +92,7 @@ export default class Accounts {
     let best = null;
     let most = -1;
     const using = this.list.find((a) => a.id === this.using);
-    for (const a of this.list) {
+    for (const a of this.visible()) {
       if (a.kind !== "claude" || a.why) continue;
       // With a hub: the same Claude account under the other source is one fuel, no way out.
       if (this.hasHub && using && a.id !== using.id && sameClaude(a, using)) continue;
@@ -347,7 +367,8 @@ export default class Accounts {
   }
 
   key(e, cx) {
-    const n = this.list.length;
+    const visible = this.visible();
+    const n = visible.length;
     if (this.adding) {
       if (e.key !== "escape") return;
       this.adding = false;
@@ -356,18 +377,18 @@ export default class Accounts {
       return;
     }
     if (e.key === "escape") return this.close();
-    if (e.key === "a") {
+    if (e.key === "a" && this.tab !== "hub") {
       this.adding = true;
       this.nameInput.focus();
       cx.notify();
       return;
     }
+    if (e.key === "a") return;
+    if (e.key === "r") return this.refresh(cx);
     if (!n) return;
     if (e.key === "down" || e.key === "j") this.at = (this.at + 1) % n;
     else if (e.key === "up" || e.key === "k") this.at = (this.at + n - 1) % n;
-    else if (e.key === "enter") this.switchTo(this.list[this.at], null, cx);
-    else if (e.key === "r") this.refresh(cx);
-
+    else if (e.key === "enter") this.switchTo(visible[this.at], null, cx);
     else return;
     cx.notify();
   }
@@ -375,7 +396,8 @@ export default class Accounts {
   render(cx) {
     const k = tokens();
     const best = this.best();
-    const kcBox = this.keychainBox(k);
+    const visible = this.visible();
+    const kcBox = this.tab === "hub" ? null : this.keychainBox(k);
     const keyHint = (key, what) => h_flex().gap(4).items_center().child(div().font_black().text_color(k.ink).child(key)).child(div().text_color(k.muted).child(what));
     const box = v_flex()
       .id("orcha-accounts")
@@ -414,6 +436,11 @@ export default class Accounts {
               .child(icon("x", 14, k.ink)),
           ),
       )
+      .when(this.hasHub, (el) => el.child(
+        h_flex().flex_none().px(12).py(8).gap(8).bg(k.card).border_b(2).border_color(k.line)
+          .child(button(k, "accounts-local-tab", this.tab === "local" ? "LOCAL ✓" : "LOCAL", (_e, cx) => this.selectTab("local", cx), { small: true, primary: this.tab === "local" }))
+          .child(button(k, "accounts-hub-tab", this.tab === "hub" ? "HUB ✓" : "HUB", (_e, cx) => this.selectTab("hub", cx), { small: true, primary: this.tab === "hub" }))
+      ))
       .child(
         v_flex()
           .id("accounts-list")
@@ -423,8 +450,8 @@ export default class Accounts {
           .gap(8)
           .overflow_y_scrollbar()
           .when(Boolean(kcBox), (el) => el.child(kcBox))
-          .children(this.list.length ? this.list.map((a, i) => this.row(k, a, i, best, cx)) : [div().p(12).text_color(k.dim).child("No accounts yet. Add your first one below.")])
-          .child(this.addRow(k)),
+          .children(visible.length ? visible.map((a, i) => this.row(k, a, i, best, cx)) : [div().p(12).text_color(k.dim).child(this.tab === "hub" ? "No hub accounts yet. Pair this Mac in Settings → Accounts → Hub." : "No local accounts yet. Add your first one below.")])
+          .when(this.tab !== "hub", (el) => el.child(this.addRow(k))),
       )
       .child(
         h_flex()
@@ -439,7 +466,7 @@ export default class Accounts {
           .text_size(11.5)
           .child(keyHint("↵", "switch"))
           .child(keyHint("↑↓", "move"))
-          .child(keyHint("a", "add"))
+          .when(this.tab !== "hub", (el) => el.child(keyHint("a", "add")))
           .child(keyHint("r", this.busy === "refresh" ? "refreshing…" : "refresh"))
           .child(div().flex_1())
           .child(keyHint("esc", "close")),

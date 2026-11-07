@@ -125,7 +125,14 @@ export async function stationPair(url, code, pin) {
 
 /** Unpairs this Mac (the hub accounts' folders and their chats stay). */
 export async function stationForget() {
-  await exec("python3", ["-I", STATION(), "forget"]);
+  const r = await exec("python3", ["-I", STATION(), "forget"]);
+  return r.code === 0 ? null : lastLine(r, "Could not unpair this Mac.");
+}
+
+/** Move a paired Mac to another address of the same pinned hub. */
+export async function stationAddress(url) {
+  const r = await exec("python3", ["-I", STATION(), "address", url]);
+  return r.code === 0 ? null : lastLine(r, "Could not change the hub address.");
 }
 
 const span = (ms) => {
@@ -292,7 +299,7 @@ export async function keepInfo(from) {
   if (!from?.terminal) return { why: "Click into an agent first.", others: 0 };
   const claudes = panes().filter((p) => p.terminal && p.terminal !== from.terminal && p.program?.key?.includes("claude"));
   const [folder, ...folders] = await configFolders([from.terminal, ...claudes.map((p) => p.terminal)]);
-  if (folder.startsWith(STATION_DIR())) return { why: "this chat runs on a hub account, whose token lives in its process: restart it onto another account instead", others: 0 };
+  if (folder.startsWith(STATION_DIR())) return { why: "this chat runs through the hub relay: restart it onto another account instead", others: 0 };
   return { why: null, others: folders.filter((f) => f === folder).length };
 }
 
@@ -300,7 +307,7 @@ export async function keepInfo(from) {
  *  again within half a minute, and FUEL shows it BORROWED. Chats sharing its
  *  folder move with it (keepInfo). Null, or why not. */
 export async function keepRunningOn(account, from) {
-  if (isStation(account)) return "A running chat can't borrow a hub account: its token has to be in the chat's process from the start. Restart the chat onto it, or open a new pane.";
+  if (isStation(account)) return "A running chat needs a restart to use a hub account: its relay endpoint is set when Claude Code starts. Restart the chat onto it, or open a new pane.";
   const { why } = await keepInfo(from);
   if (why) return why;
   const folder = await configFolder(from.terminal);

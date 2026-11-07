@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -I
-"""Orcherd's side of Token Station: the hub on your LAN that hands your own
-Claude setup-tokens to your own machines (repo token-station). Kept apart
+"""Orcherd's side of Token Station: the hub on your LAN that routes Claude
+Code requests with your own setup-tokens (repo token-station). Kept apart
 from accounts.py on purpose: nothing here runs until this Mac is paired, so
 Orcherd without a hub works exactly as before.
 
@@ -13,13 +13,13 @@ Orcherd without a hub works exactly as before.
   tokenstation.py adopt <from> <to> <cwd>  let `claude --continue` in folder <to> find
                                          the chat last had in <from> (- is ~/.claude)
   tokenstation.py forget                 unpair: key, settings, cache and leases gone
+  tokenstation.py address <host:port>    move this pairing to the same hub at a new address
 
 On a Mac with no Orcherd, only a terminal (installed by the hub's
 /client/install.sh, used as `hubclaude`):
 
-  tokenstation.py list                   the hub's accounts, the day, what this Mac borrows
-  tokenstation.py use <id>               borrow: plain `claude` runs on hub account <id>
-  tokenstation.py restore                give this Mac its own Claude sign-in back
+  tokenstation.py list                   the hub's accounts and the day
+  tokenstation.py restore                undo an older token borrow, if any
   tokenstation.py service install|remove the agent that runs `sync` every minute
   tokenstation.py uninstall              restore, unpair, remove the agent and the client
 
@@ -32,20 +32,14 @@ read). Each hub account gets its own Claude folder,
 ~/.config/orcherd/station/<id>: ~/.claude's files linked in except
 `projects`, so its transcripts, and so its token use, are its own.
 
-The token goes from the hub straight into the env of `claude` (os.execve):
-never argv, never a file. So it leaves this Mac when that claude ends, and
-Orcherd ends it (and what it started, which has its env) when the lease
-ends: at the day's end (even with the hub out of reach), when the hub says
-so (Stop on its Live page, account deleted) and when the hub no longer
-knows this Mac (revoked).
+`run` sends Claude Code's Messages API requests through the hub. Its env has
+the machine key and the hub URL, never the setup-token. The hub checks the
+lease on every request and forwards it with the stored token. Orcherd still
+ends the pane at the day's end or when the hub stops its lease.
 
-Borrow (`use`) is the one place a token is written down: as the sign-in of
-~/.claude in the Keychain (Claude's own item, "Claude Code-credentials"), so
-a plain `claude`, and the ones already running, use the hub account. The
-Mac's own sign-in waits in the Keychain item "token-station-borrow-backup"
-and goes back on `restore`, at the day's end, on Stop, and when the hub no
-longer knows this Mac. The borrowed sign-in also says it expires at the
-day's end, so Claude stops using it then even if nothing here runs.
+Older versions supported `use`, which placed a setup-token in Claude Code's
+Keychain item. New borrowing is disabled. `restore` and the sync cleanup
+remain so a Mac that borrowed before this update gets its own sign-in back.
 
 This file's original is token-station's client/tokenstation.py (the hub
 serves it to terminal-only Macs); Orcherd's mods/orcha/bin/ has a copy. The machine key lives in the Keychain and reaches
@@ -86,6 +80,7 @@ BACKUP_SERVICE = "token-station-borrow-backup"
 BORROW_FILE = os.path.join(CACHE, "station-borrow.json")
 BORROW_LAST = os.path.join(CACHE, "station-borrow-last.json")  # a borrow was restored: watch for it coming back
 LOCK_FILE = os.path.join(CACHE, "station.lock")
+CERT_FILE = os.path.join(CONFIG_DIR, "station-cert.pem")
 CLIENT_DIR = os.path.join(HOME, ".local", "share", "token-station-client")
 WRAPPER = os.path.join(HOME, ".local", "bin", "hubclaude")
 AGENT_LABEL = "com.token-station.client"
@@ -215,8 +210,16 @@ def hub_url(text):
     u = urlsplit(text if "://" in text else f"https://{text}")
     if u.scheme != "https" or not u.hostname:
         raise Fail("The hub talks HTTPS only: https://<host>:<port>.")
+    if u.hostname in ("0.0.0.0", "::"):
+        raise Fail("0.0.0.0 is the hub's listening address, not an address clients can use. Enter its .local name or LAN IP.")
+    if u.username or u.password or u.path not in ("", "/") or u.query or u.fragment:
+        raise Fail("Enter only the hub's HTTPS host and port.")
+    try:
+        port = u.port or DEFAULT_PORT
+    except ValueError:
+        raise Fail("The hub port must be a number from 1 to 65535.")
     host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
-    return f"https://{host}:{u.port or DEFAULT_PORT}"
+    return f"https://{host}:{port}"
 
 
 def pin_of_der(der):
@@ -330,10 +333,69 @@ def cmd_pair(path=None):
 
 def cmd_forget():
     """Unpairs this Mac. The hub accounts' folders stay: their chats are yours."""
+    link, key = read_json(LINK_FILE), kc_read()
+    with locked():
+        restore(link, key) if link and key else restore()
+        reachable = bool(link and key)
+        for lease in read_leases():
+            stop(lease, "this Mac was unpaired")
+            if reachable:
+                try:
+                    request(link, "POST", "/api/v1/release", {"lease_id": lease["lease_id"]}, key=key)
+                except Fail:
+                    reachable = False  # The hub expires unreachable leases after 90 s.
     kc_delete()
-    for f in (LINK_FILE, CACHE_FILE, USAGE_FILE):
+    for f in (LINK_FILE, CACHE_FILE, USAGE_FILE, CERT_FILE):
         with_suppressed(os.remove, f)
     shutil.rmtree(LEASES, ignore_errors=True)
+
+
+def cmd_address(url):
+    """Move a paired Mac to another address of the same pinned hub."""
+    link = read_json(LINK_FILE)
+    key = kc_read()
+    if not link or not key:
+        raise Fail("This Mac is not paired with a hub.")
+    updated = {**link, "url": hub_url(url)}
+    trusted_hub_cert(updated)
+    status, out = request(updated, "GET", "/api/v1/accounts", key=key)
+    if status != 200:
+        raise Fail(why(out, f"The hub refused this machine ({status}). Pair again if it was revoked."))
+    write_json(LINK_FILE, updated)
+    sync(updated)
+    print(json.dumps({"url": updated["url"], "hub_name": updated.get("hub_name")}))
+
+
+def trusted_hub_cert(link):
+    """Pin the live hub cert for Claude Code's TLS stack before any relay run."""
+    u = urlsplit(link["url"])
+    ctx = ssl._create_unverified_context()
+    try:
+        with socket.create_connection((u.hostname, u.port), timeout=8) as s:
+            with ctx.wrap_socket(s, server_hostname=u.hostname) as tls:
+                der = tls.getpeercert(binary_form=True)
+    except OSError:
+        raise Fail("The hub's certificate could not be read. Try again when it is online.")
+    if pin_of_der(der) != link["pin"]:
+        raise Fail("The hub's cert is not the one paired. Pair this Mac again.")
+    make_dir(CONFIG_DIR)
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".station-cert-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(ssl.DER_cert_to_PEM_cert(der))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CERT_FILE)
+    except BaseException:
+        with_suppressed(os.remove, tmp)
+        raise
+    try:
+        verified = ssl.create_default_context(cafile=CERT_FILE)
+        with socket.create_connection((u.hostname, u.port), timeout=8) as s:
+            with verified.wrap_socket(s, server_hostname=u.hostname):
+                pass
+    except (OSError, ssl.SSLError):
+        raise Fail("The hub cert does not cover this address, or the hub went offline. Use the .local name shown by `station.py cert` on the hub.")
+    return CERT_FILE
 
 
 # ---------- a hub account's folder
@@ -409,22 +471,30 @@ def cmd_run(aid, args):
     if not claude:
         wait_enter("Token Station: the claude command is not installed.")
     folder = prepare_folder(aid)
+    try:
+        cert = trusted_hub_cert(link)
+    except Fail as e:
+        wait_enter(f"Token Station: {e}")
     pane, cwd = os.environ.get("HC_TERMINAL_ID", ""), os.getcwd()
     try:
         status, out = request(link, "POST", f"/api/v1/accounts/{aid}/lease",
-                              {"pane": pane[:200], "cwd": cwd[:1024]}, key=key)
+                              {"pane": pane[:200], "cwd": cwd[:1024], "mode": "relay"}, key=key)
     except Fail as e:
         wait_enter(f"Token Station: {e}")
     if status != 201:
         held = "".join(f"\n  · {l.get('machine')} {l.get('pane') or ''} {l.get('cwd') or ''}" for l in out.get("leases", []))
         wait_enter(f"Token Station: {why(out, f'the hub said no ({status})')}.{held}")
-    token = out["token"]
     write_json(os.path.join(LEASES, f"{out['lease_id']}.json"),
                {"lease_id": out["lease_id"], "account": aid, "pid": os.getpid(), "folder": folder,
                 "started": time.time(), "ends_at": out.get("ends_at"), "pane": pane, "cwd": cwd,
                 "tokens": [0, 0, 0, 0]})
-    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-    env.update(CLAUDE_CONFIG_DIR=folder, CLAUDE_CODE_OAUTH_TOKEN=token)
+    env = {k: v for k, v in os.environ.items() if k not in
+           ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY")}
+    env.update(CLAUDE_CONFIG_DIR=folder, ANTHROPIC_AUTH_TOKEN=key,
+               CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST="1",
+               ANTHROPIC_BASE_URL=link["url"] + out["relay"], NODE_EXTRA_CA_CERTS=cert)
     # The same process becomes claude: the lease file's pid is claude's pid.
     os.execve(claude, ["claude", *args], env)
 
@@ -595,7 +665,7 @@ def local_fuel(hub_emails):
 
 class locked:
     """One of sync / use / restore at a time: the agent's minute and Orcherd's
-    fuel tick may both sync while the person types `hubclaude use`."""
+    fuel tick may sync while a person restores an older borrow."""
 
     def __enter__(self):
         make_dir(CACHE)
@@ -622,8 +692,8 @@ def sync(link):
             stop(l, "the hub's day is over")
     sweep_borrow()
     b = borrowed()
-    if b and time.time() >= b.get("ends_at", 0):
-        restore()  # the day is over: the hub ended that lease already
+    if b:
+        restore()  # Older clients could leave a setup-token in the Keychain.
         b = None
     key = kc_read()
     cache = read_json(CACHE_FILE) or {}
@@ -763,16 +833,6 @@ def is_own_sign_in(raw):
     return o is not None and bool(o.get("refreshToken"))
 
 
-def borrow_sign_in(token, ends_at, live):
-    """The item as it is (Claude keeps MCP sign-ins in it too) with only the
-    Claude sign-in swapped for one made of the setup-token: no refresh token
-    (it can't be refreshed, and needn't be), and it ends with the day."""
-    o = item_json(live)
-    o["claudeAiOauth"] = {"accessToken": token, "refreshToken": None,
-                          "expiresAt": int(ends_at * 1000), "scopes": ["user:inference"]}
-    return json.dumps(o)
-
-
 def move_borrow_end(b, ends_at):
     """Start day again moved the day's end: so does the borrowed sign-in's."""
     raw = kc_read(CLAUDE_SERVICE)
@@ -876,68 +936,12 @@ def cmd_list():
         fuel = f"  5h {fuel[0]:.0f}%" if isinstance(fuel, list) and fuel and fuel[0] is not None else ""
         print(f"  {a['id']:>3}  {a.get('label', '')[:20]:<20} {(a.get('email') or '')[:30]:<30} {state}{fuel}")
     b = borrowed()
-    print(f"\nBorrowing {b.get('label') or b['account']} until {when(b.get('ends_at'))}: `hubclaude restore` gives the Mac its own sign-in back."
-          if b else "\n`hubclaude use <id>`: plain `claude` runs on that account until the day ends.")
+    print(f"\nOlder borrow of {b.get('label') or b['account']} is still active; run `hubclaude restore`."
+          if b else "\n`hubclaude run <id>`: start one Claude Code session through the hub.")
 
 
 def cmd_use(aid):
-    if not re.fullmatch(r"\d{1,9}", aid):
-        raise Fail("hubclaude use <id>: the id `hubclaude` lists.")
-    link, key = linked()
-    if os.path.exists(os.path.join(HOME, ".claude", ".credentials.json")):
-        raise Fail("Claude keeps this Mac's sign-in in ~/.claude/.credentials.json, not the Keychain, so it "
-                   "can't be swapped. `hubclaude run <id>` starts one claude on the hub account instead.")
-    with locked():
-        b = borrowed()
-        if b and str(b["account"]) == aid:
-            print(f"Already on {b.get('label') or aid} until {when(b.get('ends_at'))}.")
-            return
-        if b:
-            restore(link, key)
-        status, out = request(link, "POST", f"/api/v1/accounts/{aid}/lease", {"pane": "borrow", "cwd": HOME}, key=key)
-        if status != 201:
-            held = "".join(f"\n  · {l.get('machine')} {l.get('pane') or ''}" for l in out.get("leases", []))
-            raise Fail(f"{why(out, f'The hub said no ({status}).')}{held}")
-        token, ends_at = out["token"], out.get("ends_at") or time.time() + 8 * 3600
-        label = next((a.get("label") for a in (read_json(CACHE_FILE) or {}).get("accounts", [])
-                      if str(a.get("id")) == aid), None)
-        try:
-            live = kc_read(CLAUDE_SERVICE, strict=True)
-            account = kc_account(CLAUDE_SERVICE)
-            # The Mac's own sign-in goes aside first; if that fails, nothing changed.
-            # It always replaces what was aside: an older one may hold a refresh
-            # token rotated since. With no sign-in now, nothing is kept: an old
-            # one must not come back at restore. A borrowed one in place (a
-            # borrow cut short) leaves the kept one alone: that is the Mac's own.
-            if is_own_sign_in(live):
-                kc_write(live, BACKUP_SERVICE, account)
-            elif not is_borrowed_sign_in(live):
-                kc_delete(BACKUP_SERVICE)
-            write_json(BORROW_FILE, {"lease_id": out["lease_id"], "account": aid, "label": label,
-                                     "ends_at": ends_at, "started": time.time(), "kc_account": account,
-                                     "tokens": [0, 0, 0, 0]})
-            kc_write(borrow_sign_in(token, ends_at, live), CLAUDE_SERVICE, account)
-        except Exception:
-            restore(link, key)
-            raise
-        # Token use counts from now: the chats already there are the Mac's own.
-        usage = read_json(USAGE_FILE) or {}
-        files = {}
-        for root, _dirs, names in os.walk(os.path.join(HOME, ".claude", "projects")):
-            for n in names:
-                if n.endswith(".jsonl"):
-                    try:
-                        st = os.stat(os.path.join(root, n))
-                    except OSError:
-                        continue
-                    files[os.path.join(root, n)] = {"offset": st.st_size, "ino": st.st_ino, "id": None,
-                                                    "last": [0, 0, 0, 0], "tot": [0, 0, 0, 0]}
-        usage["borrow"] = {"files": files}
-        usage.setdefault("sent", {})["borrow"] = [0, 0, 0, 0]
-        write_json(USAGE_FILE, usage)
-    print(f"Plain `claude` now runs on {label or 'hub account ' + aid} until {when(ends_at)} (the day's end); "
-          "ones already running switch within half a minute.\n"
-          "`hubclaude restore` gives this Mac its own sign-in back (it also comes back by itself when the day ends).")
+    raise Fail("Token borrowing is disabled. Use `hubclaude run <id>` so the setup-token stays on the hub.")
 
 
 def cmd_restore():
@@ -1057,6 +1061,8 @@ def main(argv):
             cmd_adopt(*rest)
         elif cmd == "forget":
             cmd_forget()
+        elif cmd == "address" and len(rest) == 1:
+            cmd_address(rest[0])
         elif cmd == "list" and not rest:
             cmd_list()
         elif cmd == "use" and len(rest) == 1:

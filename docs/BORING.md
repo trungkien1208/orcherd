@@ -57,6 +57,27 @@ You clicked. Respect. Here's everything nobody reads.
 - **SIGN IN** shows when orcha can't read an account's fuel, with the reason. `r` asks every account right now.
 - **Settings › Hand-off** puts three marks on the fuel bar: ask the agent for a checklist, offer to switch, switch by itself. Kept in Orcherd's own `~/.config/orcherd/config.toml`.
 
+### Token Station hub accounts
+
+Pair this Mac in Settings › Accounts › Token Station after comparing the hub's
+certificate check. Hub accounts appear with a HUB tag. Starting one, or
+switching to one with Restart or New pane, runs `tokenstation.py run <id>` for
+that pane. It sets the hub relay endpoint only in the new Claude Code process;
+Orcherd does not change your global Claude settings. A local account or a
+plain `claude` command keeps its own connection.
+
+The hub checks the pane's lease on each request. End day, Stop, or machine
+revocation blocks further relay requests. Orcherd stops the pane at its next
+sync and keeps its chat for a later restart. The hub's setup-token stays on
+the hub for these runs. Clients from older Token Station versions may already
+have copied a setup-token; updating the hub cannot revoke that copy at
+Anthropic.
+Unpair stops this Mac's hub panes, releases their leases when the hub is
+reachable, and keeps their chats. Revoke the machine on the hub separately.
+Settings → Accounts and the ACCOUNTS switcher have separate Local and Hub tabs. If the hub's address changes, use
+**Change address** in the Hub tab; it verifies the same pinned certificate
+and keeps the pairing. Restart running hub panes afterward.
+
 
 ## Opening links and files
 

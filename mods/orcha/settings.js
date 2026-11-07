@@ -9,7 +9,7 @@ import { RULES, SKILLS } from "./catalog.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
 import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate } from "./version.js";
-import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
 
 // Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
 // is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
@@ -117,7 +117,7 @@ export default class Settings {
     if (pending && pending.until > Date.now()) setShared("orcha.openSection", null);
     const asked = props()?.section ?? (pending && pending.until > Date.now() ? pending.id : null);
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "projects";
-    this.orcha = { project: null, info: null, busy: {}, failed: {}, addKind: "claude", accounts: null, active: null, icons: {} };
+    this.orcha = { project: null, info: null, busy: {}, failed: {}, addKind: "claude", accountTab: "local", accounts: null, active: null, icons: {} };
     cx.spawn(async (cx) => {
       try {
         this.orcha.icons = JSON.parse((await readTextFile(configFile("project-icons.json"))) ?? "{}") ?? {};
@@ -134,6 +134,8 @@ export default class Settings {
     this.accountInput.on("submit", (_e, cx) => this.addAccount(cx));
     this.stationUrlInput = InputState.new({ placeholder: "hub address, like kien-mac.local:8787" });
     this.stationUrlInput.on("submit", (_e, cx) => this.stationCheck(cx));
+    this.stationAddressInput = InputState.new({ placeholder: "new hub address, e.g. mac.local:8787" });
+    this.stationAddressInput.on("submit", (_e, cx) => this.stationMove(cx));
     this.stationCodeInput = InputState.new({ placeholder: "6-digit code" });
     this.stationCodeInput.on("submit", (_e, cx) => this.stationPairGo(cx));
     this.renameInput = InputState.new();
@@ -1275,12 +1277,18 @@ export default class Settings {
   accounts(t, cx) {
     if (!this.orcha.accounts) this.loadAccounts(cx);
     const k = tokens();
+    const hubTab = this.orcha.accountTab === "hub";
     const out = v_flex()
       .w_full()
       .child(this.heading(t, "Accounts"))
-      .child(div().pb(6).text_size(12.5).text_color(t.dim).child("The default account is the one new Claude chats start on, and chats started the usual way follow it. To move just one chat, click into it and use 👤 in the header. Fuel is what is left of each plan, read by orcha."))
-      .child(this.stationSection(t));
-    for (const a of this.orcha.accounts ?? []) {
+      .child(h_flex().gap(8).py(8)
+        .child(this.button(t, "accounts-local", hubTab ? "Local" : "Local ✓", (_e, cx) => { this.orcha.accountTab = "local"; cx.notify(); }))
+        .child(this.button(t, "accounts-hub", hubTab ? "Hub ✓" : "Hub", (_e, cx) => { this.orcha.accountTab = "hub"; cx.notify(); })))
+      .child(div().pb(6).text_size(12.5).text_color(t.dim).child(hubTab
+        ? "Hub accounts run through Token Station. Start day on the hub before opening a chat."
+        : "Local accounts use this Mac's sign-ins. The default is used by new Claude chats; 👤 moves one chat."));
+    if (hubTab) out.child(this.stationSection(t));
+    for (const a of (this.orcha.accounts ?? []).filter((a) => isStation(a) === hubTab)) {
       const inUse = a.kind === "claude" && a.id === this.orcha.active;
       const gauges = [fuelGauge(k, "5H", a.limits.session), fuelGauge(k, "WEEK", a.limits.weekly), fuelGauge(k, "MONTH", a.limits.monthly)].filter(Boolean);
       const token = tokenState(a);
@@ -1319,7 +1327,7 @@ export default class Settings {
     const addButton = this.orcha.busy.add
       ? div().text_size(12.5).text_color(t.dim).child("adding…")
       : this.button(t, "acc-add", "Add and sign in", (_e, cx) => this.addAccount(cx));
-    out.child(
+    if (!hubTab) out.child(
       v_flex()
         .w_full()
         .gap(6)
@@ -1387,8 +1395,11 @@ export default class Settings {
       const state = st.error ?? (st.grant?.open ? "The hub's day is on: hub accounts can start here." : "The hub's day isn't started: hub accounts wait for Start day on the hub.");
       return box
         .child(text(`Paired with tokenstation@${st.hub_name} · ${st.url}`, t.foreground))
-        .child(text(`Cert ${st.check}. Hub accounts show above with HUB; they start in their own folder, on the hub's token.`))
+        .child(text(`Cert ${st.check}. HUB accounts run through the hub relay for each pane; local accounts keep their own connection.`))
         .child(text(state, st.error ? t.blocked : t.dim))
+        .child(text("Use the hub's .local name or an IP covered by its cert. 0.0.0.0 is only its listening address."))
+        .child(h_flex().gap(8).pt(4).child(field(this.stationAddressInput))
+          .child(busy ? text(busy) : this.button(t, "station-address", "Change address", (_e, cx) => this.stationMove(cx))))
         .child(h_flex().gap(8).pt(4)
           .child(busy ? text(busy) : this.button(t, "station-sync", "Sync now", (_e, cx) => this.stationSync(cx)))
           .child(this.button(t, "station-forget", this.orcha.stationConfirm ? "Sure? Unpair" : "Unpair this Mac", (_e, cx) => this.stationUnpair(cx))));
@@ -1412,10 +1423,15 @@ export default class Settings {
     this.orcha.busy.station = label;
     cx.notify();
     cx.spawn(async (cx) => {
-      await work();
-      delete this.orcha.busy.station;
-      this.loadAccounts(cx);
-      setShared("orcha.fuelRev", Date.now());
+      try {
+        await work();
+      } catch (error) {
+        notify({ title: "Token Station failed", body: String(error), level: "error", timeout: 8000 });
+      } finally {
+        delete this.orcha.busy.station;
+        this.loadAccounts(cx);
+        setShared("orcha.fuelRev", Date.now());
+      }
     });
   }
 
@@ -1448,6 +1464,17 @@ export default class Settings {
     this.stationRun(cx, "syncing…", () => refreshFuel(true));
   }
 
+  stationMove(cx) {
+    this.stationRun(cx, "changing address…", async () => {
+      const failed = await stationAddress(this.stationAddressInput.value());
+      if (failed) notify({ title: "Address unchanged", body: failed, level: "error", timeout: 8000 });
+      else {
+        this.stationAddressInput.set_value("");
+        notify({ title: "Hub address changed", body: "Restart any running hub panes so Claude Code uses the new address.", level: "success", timeout: 8000 });
+      }
+    });
+  }
+
   stationUnpair(cx) {
     if (!this.orcha.stationConfirm) {
       this.orcha.stationConfirm = true;
@@ -1456,7 +1483,11 @@ export default class Settings {
     }
     this.orcha.stationConfirm = false;
     this.stationRun(cx, "unpairing…", async () => {
-      await stationForget();
+      const failed = await stationForget();
+      if (failed) {
+        notify({ title: "Unpair failed", body: failed, level: "error", timeout: 8000 });
+        return;
+      }
       notify({ title: "Unpaired", body: "Hub accounts are gone from this Mac; their chats stay in ~/.config/orcherd/station. Revoke this Mac on the hub too.", level: "success", timeout: 8000 });
     });
   }
