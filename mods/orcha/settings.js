@@ -1392,7 +1392,7 @@ export default class Settings {
       .child(div().text_size(14).text_color(t.foreground).child("Token Station"));
     if (!st) return box.child(text("…"));
     if (st.paired) {
-      const state = st.error ?? (st.grant?.open ? "The hub's day is on: hub accounts can start here." : "The hub's day isn't started: hub accounts wait for Start day on the hub.");
+      const state = st.error ?? (st.grant?.open ? `The hub's day is on${st.grant.ends_at ? ` until ${new Date(st.grant.ends_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}: hub accounts can start here.` : "The hub's day isn't started: hub accounts wait for Start day on the hub.");
       return box
         .child(text(`Paired with tokenstation@${st.hub_name} · ${st.url}`, t.foreground))
         .child(text(`Cert ${st.check}. HUB accounts run through the hub relay for each pane; local accounts keep their own connection.`))

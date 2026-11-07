@@ -19,6 +19,7 @@ On a Mac with no Orcherd, only a terminal (installed by the hub's
 /client/install.sh, used as `hubclaude`):
 
   tokenstation.py list                   the hub's accounts and the day
+  tokenstation.py menu                   choose an account and chat mode in Terminal
   tokenstation.py restore                undo an older token borrow, if any
   tokenstation.py service install|remove the agent that runs `sync` every minute
   tokenstation.py uninstall              restore, unpair, remove the agent and the client
@@ -51,6 +52,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -58,7 +60,10 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import termios
 import time
+import tty
+import unicodedata
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -428,10 +433,13 @@ def projects_of(folder):
     return os.path.realpath(os.path.join(base, "projects"))
 
 
-def cmd_adopt(src, dst, cwd):
+def cmd_adopt(src, dst, cwd, every=False, if_newer=False):
     """`claude --continue` in `dst` continues the newest chat of `cwd` it can
     see. A hub folder sees only its own, so the chat last had in `src` is
-    linked into it (Claude then writes on through the link)."""
+    linked into it (Claude then writes on through the link). every: all of
+    that folder's chats, for `--resume`'s list. if_newer: it becomes the one
+    `--continue` takes only if newer than the hub folder's own (a terminal's
+    "latest"); Orcherd's Restart wants the pane's own chat, always."""
     a, b = projects_of(src), projects_of(dst)
     if a == b:
         return
@@ -444,14 +452,21 @@ def cmd_adopt(src, dst, cwd):
         return
     newest = max(chats, key=os.path.getmtime)
     make_dir(os.path.join(b, slug))
-    link = os.path.join(b, slug, os.path.basename(newest))
-    if not os.path.lexists(link):
-        os.symlink(os.path.realpath(newest), link)
-    os.utime(link, follow_symlinks=True)  # the newest one there, for --continue
+    for chat in sorted(chats, key=os.path.getmtime) if every else [newest]:
+        link = os.path.join(b, slug, os.path.basename(chat))
+        if not os.path.lexists(link):
+            os.symlink(os.path.realpath(chat), link)
+    own = [os.path.join(b, slug, f) for f in os.listdir(os.path.join(b, slug))
+           if f.endswith(".jsonl") and not os.path.islink(os.path.join(b, slug, f))]
+    if not if_newer or not own or os.path.getmtime(newest) >= max(os.path.getmtime(f) for f in own):
+        os.utime(os.path.join(b, slug, os.path.basename(newest)), follow_symlinks=True)
 
 
 def wait_enter(text):
-    """A pane that would vanish says why first."""
+    """A pane that would vanish says why first. In a plain terminal (no
+    Orcherd pane) the message stays on screen anyway: just say it."""
+    if not os.environ.get("HC_TERMINAL_ID"):
+        sys.exit(text)
     sys.stderr.write(f"\n{text}\n\nEnter closes this pane. ")
     sys.stderr.flush()
     with_suppressed(lambda: sys.stdin.readline())
@@ -471,6 +486,13 @@ def cmd_run(aid, args):
     if not claude:
         wait_enter("Token Station: the claude command is not installed.")
     folder = prepare_folder(aid)
+    # In a plain terminal, --continue / --resume should find the chats this
+    # folder had under the Mac's own sign-in too (Orcherd adopts before it runs).
+    if not os.environ.get("HC_TERMINAL_ID"):
+        if any(a in ("--resume", "-r") for a in args):
+            cmd_adopt("-", folder, os.getcwd(), every=True, if_newer=True)
+        elif any(a in ("--continue", "-c") for a in args):
+            cmd_adopt("-", folder, os.getcwd(), if_newer=True)
     try:
         cert = trusted_hub_cert(link)
     except Fail as e:
@@ -940,6 +962,199 @@ def cmd_list():
           if b else "\n`hubclaude run <id>`: start one Claude Code session through the hub.")
 
 
+def menu_reason(cache, account):
+    """Why this account cannot open a new hub session right now."""
+    if cache.get("error"):
+        return cache["error"]
+    if not account.get("enabled"):
+        return "Disabled on the hub"
+    if account.get("needs_renew"):
+        return "Needs renew on the hub"
+    if not (cache.get("grant") or {}).get("open"):
+        return "Day off — ask the owner to Start day on the hub"
+    limit = account.get("max_leases")
+    if limit is not None and account.get("live_leases", 0) >= limit:
+        return f"Lease limit reached ({account.get('live_leases', 0)}/{limit})"
+    return None
+
+
+def menu_key(fd):
+    """One key from a real terminal, including arrow keys."""
+    key = os.read(fd, 1)
+    if key == b"\x1b":
+        if select.select([fd], [], [], 0.06)[0] and os.read(fd, 1) == b"[":
+            if select.select([fd], [], [], 0.06)[0]:
+                return {b"A": "up", b"B": "down"}.get(os.read(fd, 1), "escape")
+        return "escape"
+    if key in (b"\r", b"\n"):
+        return "enter"
+    if key == b"\x03":
+        return "quit"
+    return key.decode("utf-8", "ignore").lower()
+
+
+def menu_cells(value):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in value)
+
+
+def menu_clip(value, columns):
+    """Clip Unicode by terminal cells, not Python characters."""
+    out, used = [], 0
+    for char in str(value):
+        cells = menu_cells(char)
+        if used + cells > columns:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out)
+
+
+def menu_clip_left(head, path, columns):
+    """The project's path with ~ for home, cut from the left: its last folder is what tells it apart."""
+    if path == HOME or path.startswith(HOME + os.sep):
+        path = "~" + path[len(HOME):]
+    room = columns - menu_cells(head)
+    if menu_cells(path) <= room:
+        return head + path
+    out, used = [], 1
+    for char in reversed(path):
+        cells = menu_cells(char)
+        if used + cells > room:
+            break
+        out.append(char)
+        used += cells
+    return head + "…" + "".join(reversed(out))
+
+
+def menu_screen(cache, link, account, index, action_index, message, columns, rows):
+    """A small, readable view even when the Terminal window is narrow."""
+    width = min(columns - 2, 78)
+    line = "─" * width
+    color = not os.environ.get("NO_COLOR")
+    def paint(value, code):
+        return f"\x1b[{code}m{value}\x1b[0m" if color else value
+    grant = cache.get("grant") or {}
+    day = f"DAY ON  ·  until {when(grant.get('ends_at'))}" if grant.get("open") else "DAY OFF  ·  Start day on the hub"
+    title = f"TOKEN STATION  /  {cache.get('hub_name') or link.get('hub_name') or 'Hub'}"
+    lines = [paint(menu_clip(title, width), "1;36"), paint(menu_clip(day, width), "1;32" if grant.get("open") else "1;33"),
+             paint(menu_clip_left(f"PROJECT  ", os.getcwd(), width), "2"), paint(line, "2")]
+    if account is None:
+        accounts = cache.get("accounts") or []
+        if not accounts:
+            lines.append("No accounts yet. Ask the owner to add one on the hub.")
+        else:
+            space = max(1, rows - 10)
+            start = max(0, min(index - space // 2, len(accounts) - space))
+            for i, item in enumerate(accounts[start:start + space], start):
+                reason = menu_reason(cache, item)
+                state = reason or "READY"
+                fuel = (item.get("fuel") or {}).get("session")
+                if isinstance(fuel, list) and fuel and isinstance(fuel[0], (int, float)):
+                    state += f"  ·  5H {fuel[0]:.0f}%"
+                label = menu_clip(item.get("label") or "Account", 24)
+                label = label + " " * (24 - menu_cells(label))
+                entry = f"{'›' if i == index else ' '}  {item['id']:>3}  {label}  {state}"
+                lines.append(paint(menu_clip(entry, width), "7" if i == index else "2" if reason else "0"))
+        lines += [paint(line, "2"), "↑↓ choose   Enter open   R refresh   Q quit"]
+    else:
+        label = str(account.get("label") or "Account")
+        lines += [menu_clip(f"ACCOUNT  {account['id']} · {label}", width),
+                  menu_clip(account.get("email") or "", width),
+                  menu_clip(f"Live panes  {account.get('live_leases', 0)}" +
+                            (f" / {account['max_leases']}" if account.get("max_leases") is not None else ""), width), ""]
+        options = ("New chat", "Continue latest", "Choose conversation", "Back to accounts")
+        for i, option in enumerate(options):
+            lines.append(paint(f"{'›' if i == action_index else ' '}  {option}", "7" if i == action_index else "0"))
+        lines += [paint(line, "2"), "↑↓ choose   Enter start   Esc back   R refresh"]
+    if message:
+        lines.append("")
+        lines.append(paint(menu_clip(str(message).replace("\n", " "), width), "1;33"))
+    return "\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n"
+
+
+def cmd_menu():
+    """Interactive account and chat-mode picker; pipes keep the plain list."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
+        return cmd_list()
+    if shutil.get_terminal_size((80, 24)).columns < 40:
+        raise Fail("Terminal is too narrow for the account picker. Widen it to 40 columns, or use `hubclaude list`.")
+    link, _ = linked()
+
+    def refresh():
+        with locked():
+            sync(link)
+        return read_json(CACHE_FILE) or {}
+
+    cache = refresh()
+    account, index, action_index, message = None, 0, 0, ""
+    choice = None
+    narrowed = False
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write("\x1b[?1049h\x1b[?25l")
+        sys.stdout.flush()
+        while True:
+            size = shutil.get_terminal_size((80, 24))
+            if size.columns < 40:
+                narrowed = True
+                break
+            sys.stdout.write(menu_screen(cache, link, account, index, action_index,
+                                         message, size.columns, size.lines))
+            sys.stdout.flush()
+            key = menu_key(fd)
+            message = ""
+            if key == "r":
+                cache = refresh()
+                if account is not None:
+                    account = next((a for a in cache.get("accounts", []) if a["id"] == account["id"]), None)
+                index = min(index, max(0, len(cache.get("accounts", [])) - 1))
+            elif key in ("q", "quit"):
+                break
+            elif key == "escape":
+                if account is None:
+                    break
+                account, action_index = None, 0
+            elif key in ("up", "k", "down", "j"):
+                delta = -1 if key in ("up", "k") else 1
+                if account is None:
+                    count = len(cache.get("accounts") or [])
+                    if count:
+                        index = (index + delta) % count
+                else:
+                    action_index = (action_index + delta) % 4
+            elif key == "enter":
+                if account is None:
+                    accounts = cache.get("accounts") or []
+                    if accounts:
+                        selected = accounts[index]
+                        message = menu_reason(cache, selected) or ""
+                        if not message:
+                            account, action_index = selected, 0
+                elif action_index == 3:
+                    account, action_index = None, 0
+                else:
+                    reason = menu_reason(cache, account)
+                    if reason:
+                        message = reason
+                    else:
+                        args = ([], ["--continue"], ["--resume"])[action_index]
+                        choice = str(account["id"]), args
+                        break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+    if choice:
+        cmd_run(*choice)
+    if narrowed:
+        raise Fail("Terminal became too narrow. Widen it to 40 columns, then run `hubclaude` again.")
+
+
 def cmd_use(aid):
     raise Fail("Token borrowing is disabled. Use `hubclaude run <id>` so the setup-token stays on the hub.")
 
@@ -1065,6 +1280,8 @@ def main(argv):
             cmd_address(rest[0])
         elif cmd == "list" and not rest:
             cmd_list()
+        elif cmd == "menu" and not rest:
+            cmd_menu()
         elif cmd == "use" and len(rest) == 1:
             cmd_use(rest[0])
         elif cmd == "restore" and not rest:
