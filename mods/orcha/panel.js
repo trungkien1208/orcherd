@@ -12,7 +12,7 @@ import { focused, panes, spaces, exec, run, readTextFile, home, shared, setShare
 import { tokens, button, icon, fuelGauge, readable, agentFacts, chip } from "./ui.js";
 import { showSide } from "./sidetabs.js";
 import HandoffWatch from "./handoff-watch.js";
-import { refreshFuel, claudeAccountOf } from "./accounts-data.js";
+import { refreshFuel, claudeAccountOf, readAccounts } from "./accounts-data.js";
 import { configFile, cacheFile, script } from "./paths.js";
 
 // One call: branch line, changed files, totals, last commit, the checkout's
@@ -143,6 +143,15 @@ export default class Panel {
       const known = kind === "claude" ? agentFacts().accounts?.[f?.terminal] : null;
       const pick = kind === "claude" && f?.terminal ? known?.id ?? (await claudeAccountOf(f.terminal)) : null;
       const file = kind === "claude" ? "claude-active" : "selected-account";
+      // A hub account isn't in config.json: its fuel comes with the hub's
+      // list (tokenstation.py sync), not from a cache of ours.
+      if (pick?.startsWith("station-")) {
+        const hub = (await readAccounts()).list.find((a) => a.id === pick);
+        if (!hub || asked !== this.fuelKey) return;
+        this.fuel = { label: hub.label ?? hub.id, email: hub.email || null, chip: "⚡ HUB", sub: null, limits: hub.limits };
+        cx.notify();
+        return;
+      }
       const fallback = pick ?? (await readTextFile(configFile(file)))?.trim();
       // None picked yet (a new Mac): the account of the main ~/.claude folder.
       const account = accounts.find((a) => a.id === fallback) ?? (kind === "claude" ? accounts.find((a) => !a.dir) ?? null : accounts[0]);

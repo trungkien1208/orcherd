@@ -540,7 +540,8 @@ def claude_limits(cfg):
     if oauth.get("expiresAt", 0) / 1000 < time.time():
         # Claude refreshes it on the next chat; until then the last numbers stay
         if oauth.get("refreshToken"):
-            return {"error": T["err_idle"], "transient": True}
+            # no request was made: nothing to back off from, look again next time
+            return {"error": T["err_idle"], "transient": True, "asked": False}
         return {"error": T["err_expired"]}
     if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", token):
         return {"error": T["err_signin"]}  # it goes in a curl config line: nothing else may
@@ -653,18 +654,22 @@ def get(acct, fresh=False):
     make_dir(CACHE_DIR)
     path = os.path.join(CACHE_DIR, acct + ".json")
     retry = path + ".retry"
+    # An idle sign-in costs no request to look at again, and a chat (a borrow
+    # often starts one) renews it any minute: only a real request's back-off
+    # holds it.
+    def waits(cached, age):
+        if fresh or cached is None:
+            return False
+        idle = cached.get("error") == T["err_idle"]
+        return (age < CACHE_TTL and not idle) or retry_at(retry) > time.time()
     cached, age = read_cache(path)
-    if not fresh and cached is not None and age < CACHE_TTL:
-        return cached
-    if not fresh and cached is not None and retry_at(retry) > time.time():
+    if waits(cached, age):
         return cached
     # one request at a time, however many windows ask
     with open(path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         cached, age = read_cache(path)
-        if not fresh and cached is not None and age < CACHE_TTL:
-            return cached
-        if not fresh and cached is not None and retry_at(retry) > time.time():
+        if waits(cached, age):
             return cached
         cfg = ACCOUNTS[acct]
         try:
@@ -672,8 +677,9 @@ def get(acct, fresh=False):
         except Exception as e:  # an answer of an unexpected shape, a timeout: never a token in it
             data = {"error": f"{T['err_request']} ({type(e).__name__})", "transient": True}
         if data.pop("transient", False):
-            wait = RATE_LIMIT_RETRY_AFTER if data.pop("rate_limited", False) else RETRY_AFTER
-            atomic_write(retry, str(time.time() + wait))
+            if data.pop("asked", True):
+                wait = RATE_LIMIT_RETRY_AFTER if data.pop("rate_limited", False) else RETRY_AFTER
+                atomic_write(retry, str(time.time() + wait))
             if cached is not None and "error" not in cached:
                 return cached
         else:
