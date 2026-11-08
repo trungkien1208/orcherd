@@ -16,10 +16,11 @@ Orcherd without a hub works exactly as before.
   tokenstation.py address <host:port>    move this pairing to the same hub at a new address
 
 On a Mac with no Orcherd, only a terminal (installed by the hub's
-/client/install.sh, used as `hubclaude`):
+/client/install.sh, used as `tokenstation`):
 
   tokenstation.py list                   the hub's accounts and the day
-  tokenstation.py menu                   choose an account and chat mode in Terminal
+  tokenstation.py menu                   choose an account and chat mode in Terminal,
+                                         or change the hub's address, pair again, uninstall
   tokenstation.py restore                undo an older token borrow, if any
   tokenstation.py service install|remove the agent that runs `sync` every minute
   tokenstation.py uninstall              restore, unpair, remove the agent and the client
@@ -87,7 +88,8 @@ BORROW_LAST = os.path.join(CACHE, "station-borrow-last.json")  # a borrow was re
 LOCK_FILE = os.path.join(CACHE, "station.lock")
 CERT_FILE = os.path.join(CONFIG_DIR, "station-cert.pem")
 CLIENT_DIR = os.path.join(HOME, ".local", "share", "token-station-client")
-WRAPPER = os.path.join(HOME, ".local", "bin", "hubclaude")
+WRAPPER = os.path.join(HOME, ".local", "bin", "tokenstation")
+OLD_WRAPPER = os.path.join(HOME, ".local", "bin", "hubclaude")  # its name before 2026-11-08
 AGENT_LABEL = "com.token-station.client"
 AGENT_PLIST = os.path.join(HOME, "Library", "LaunchAgents", f"{AGENT_LABEL}.plist")
 DEFAULT_PORT = 8787
@@ -318,22 +320,38 @@ def cmd_pair(path=None):
         req = json.loads(text)
     except (OSError, ValueError):
         raise Fail("pair reads {url, code, name, pin} from a file or stdin.")
-    url, pin = hub_url(req.get("url")), req.get("pin") or ""
-    code = re.sub(r"\D", "", str(req.get("code") or ""))
+    out = pair_with(req.get("url"), req.get("pin") or "", req.get("code"), req.get("name"))
+    print(json.dumps({"hub_name": out.get("hub_name"), "machine_id": out["machine_id"]}))
+
+
+def mac_name():
+    try:
+        name = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        name = ""
+    return name or socket.gethostname().split(".")[0]
+
+
+def pair_with(url, pin, code, name=None):
+    """Pair with the hub whose key is `pin`, by its 6-digit code."""
+    url = hub_url(url)
+    code = re.sub(r"\D", "", str(code or ""))
     if not re.fullmatch(r"sha256//[A-Za-z0-9+/=]{40,}", pin):
         raise Fail("Check the hub's cert first (probe).")
     if len(code) != 6:
         raise Fail("The pairing code is the 6 digits on the hub's Machines page.")
-    name = (req.get("name") or socket.gethostname().split(".")[0])[:64]
+    name = (name or mac_name())[:64]
     link = {"url": url, "pin": pin}
-    status, out = request(link, "POST", "/api/v1/pair", {"code": code, "name": name})
+    # platform: only for the hub's picture of this machine.
+    status, out = request(link, "POST", "/api/v1/pair", {"code": code, "name": name, "platform": "mac"})
     if status != 201:
         raise Fail(why(out, f"The hub said no ({status})."))
     kc_write(out["key"])
     link.update(machine_id=out["machine_id"], hub_name=out.get("hub_name"), paired_at=time.time())
     write_json(LINK_FILE, link)
     sync(link)
-    print(json.dumps({"hub_name": out.get("hub_name"), "machine_id": out["machine_id"]}))
+    return out
 
 
 def cmd_forget():
@@ -356,6 +374,11 @@ def cmd_forget():
 
 
 def cmd_address(url):
+    updated = move_address(url)
+    print(json.dumps({"url": updated["url"], "hub_name": updated.get("hub_name")}))
+
+
+def move_address(url):
     """Move a paired Mac to another address of the same pinned hub."""
     link = read_json(LINK_FILE)
     key = kc_read()
@@ -368,7 +391,7 @@ def cmd_address(url):
         raise Fail(why(out, f"The hub refused this machine ({status}). Pair again if it was revoked."))
     write_json(LINK_FILE, updated)
     sync(updated)
-    print(json.dumps({"url": updated["url"], "hub_name": updated.get("hub_name")}))
+    return updated
 
 
 def trusted_hub_cert(link):
@@ -958,8 +981,8 @@ def cmd_list():
         fuel = f"  5h {fuel[0]:.0f}%" if isinstance(fuel, list) and fuel and fuel[0] is not None else ""
         print(f"  {a['id']:>3}  {a.get('label', '')[:20]:<20} {(a.get('email') or '')[:30]:<30} {state}{fuel}")
     b = borrowed()
-    print(f"\nOlder borrow of {b.get('label') or b['account']} is still active; run `hubclaude restore`."
-          if b else "\n`hubclaude run <id>`: start one Claude Code session through the hub.")
+    print(f"\nOlder borrow of {b.get('label') or b['account']} is still active; run `tokenstation restore`."
+          if b else "\n`tokenstation` opens the picker; `tokenstation run <id>` starts one session directly.")
 
 
 def menu_reason(cache, account):
@@ -1027,69 +1050,87 @@ def menu_clip_left(head, path, columns):
     return head + "…" + "".join(reversed(out))
 
 
-def menu_screen(cache, link, account, index, action_index, message, columns, rows):
+SETTINGS_ACTIONS = ("Check the hub now", "Change the hub's address", "Pair again (a code from the hub)",
+                    "Restart the background agent", "Uninstall Token Station", "Back to accounts")
+
+
+def agent_running():
+    if TEST_KEY_FILE:
+        return os.path.exists(AGENT_PLIST)
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{AGENT_LABEL}"], capture_output=True, timeout=10)
+    return r.returncode == 0
+
+
+def menu_screen(cache, link, view, account, index, action_index, message, columns, rows):
     """A small, readable view even when the Terminal window is narrow."""
     width = min(columns - 2, 78)
     line = "─" * width
     color = not os.environ.get("NO_COLOR")
     def paint(value, code):
         return f"\x1b[{code}m{value}\x1b[0m" if color else value
+    def option(i, text, chosen, dim=False):
+        return paint(menu_clip(f"{'›' if chosen else ' '}  {text}", width), "7" if chosen else "2" if dim else "0")
     grant = cache.get("grant") or {}
     day = f"DAY ON  ·  until {when(grant.get('ends_at'))}" if grant.get("open") else "DAY OFF  ·  Start day on the hub"
     title = f"TOKEN STATION  /  {cache.get('hub_name') or link.get('hub_name') or 'Hub'}"
     lines = [paint(menu_clip(title, width), "1;36"), paint(menu_clip(day, width), "1;32" if grant.get("open") else "1;33"),
              paint(menu_clip_left(f"PROJECT  ", os.getcwd(), width), "2"), paint(line, "2")]
-    if account is None:
+    if view == "accounts":
         accounts = cache.get("accounts") or []
-        if not accounts:
+        if cache.get("error"):
+            lines.append(paint(menu_clip(cache["error"], width), "1;33"))
+        elif not accounts:
             lines.append("No accounts yet. Ask the owner to add one on the hub.")
-        else:
-            space = max(1, rows - 10)
-            start = max(0, min(index - space // 2, len(accounts) - space))
-            for i, item in enumerate(accounts[start:start + space], start):
-                reason = menu_reason(cache, item)
-                state = reason or "READY"
-                fuel = (item.get("fuel") or {}).get("session")
-                if isinstance(fuel, list) and fuel and isinstance(fuel[0], (int, float)):
-                    state += f"  ·  5H {fuel[0]:.0f}%"
-                label = menu_clip(item.get("label") or "Account", 24)
-                label = label + " " * (24 - menu_cells(label))
-                entry = f"{'›' if i == index else ' '}  {item['id']:>3}  {label}  {state}"
-                lines.append(paint(menu_clip(entry, width), "7" if i == index else "2" if reason else "0"))
+        space = max(1, rows - 12)
+        start = max(0, min(index - space // 2, len(accounts) - space))
+        for i, item in enumerate(accounts[start:start + space], start):
+            reason = menu_reason(cache, item)
+            state = reason or "READY"
+            fuel = (item.get("fuel") or {}).get("session")
+            if isinstance(fuel, list) and fuel and isinstance(fuel[0], (int, float)):
+                state += f"  ·  5H {fuel[0]:.0f}%"
+            label = menu_clip(item.get("label") or "Account", 24)
+            label = label + " " * (24 - menu_cells(label))
+            lines.append(option(i, f"{item['id']:>3}  {label}  {state}", i == index, bool(reason)))
+        lines.append("")
+        lines.append(option(len(accounts), "Hub & this Mac  (address, pair again, uninstall)", index == len(accounts)))
         lines += [paint(line, "2"), "↑↓ choose   Enter open   R refresh   Q quit"]
-    else:
+    elif view == "account":
         label = str(account.get("label") or "Account")
         lines += [menu_clip(f"ACCOUNT  {account['id']} · {label}", width),
                   menu_clip(account.get("email") or "", width),
                   menu_clip(f"Live panes  {account.get('live_leases', 0)}" +
                             (f" / {account['max_leases']}" if account.get("max_leases") is not None else ""), width), ""]
-        options = ("New chat", "Continue latest", "Choose conversation", "Back to accounts")
-        for i, option in enumerate(options):
-            lines.append(paint(f"{'›' if i == action_index else ' '}  {option}", "7" if i == action_index else "0"))
+        for i, text in enumerate(("New chat", "Continue latest", "Choose conversation", "Back to accounts")):
+            lines.append(option(i, text, i == action_index))
         lines += [paint(line, "2"), "↑↓ choose   Enter start   Esc back   R refresh"]
+    else:
+        synced = cache.get("at")
+        lines += [menu_clip(f"HUB        {link.get('url')}", width),
+                  menu_clip(f"CERT       {check_of(link['pin'])}  (as on the hub's Machines page)", width),
+                  menu_clip(f"THIS MAC   machine {link.get('machine_id')}  ·  agent "
+                            + ("running" if agent_running() else "NOT running"), width),
+                  menu_clip(f"LAST SYNC  {when(synced)}" + (f"  ·  {cache['error']}" if cache.get("error") else "  ·  ok"),
+                            width), ""]
+        for i, text in enumerate(SETTINGS_ACTIONS):
+            lines.append(option(i, text, i == action_index))
+        lines += [paint(line, "2"), "↑↓ choose   Enter do it   Esc back"]
     if message:
         lines.append("")
         lines.append(paint(menu_clip(str(message).replace("\n", " "), width), "1;33"))
     return "\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n"
 
 
-def cmd_menu():
-    """Interactive account and chat-mode picker; pipes keep the plain list."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
-        return cmd_list()
-    if shutil.get_terminal_size((80, 24)).columns < 40:
-        raise Fail("Terminal is too narrow for the account picker. Widen it to 40 columns, or use `hubclaude list`.")
-    link, _ = linked()
-
+def menu_pick(link, cache, view, message):
+    """The picker itself, in the alternate screen. Returns what to do once
+    the terminal is back to normal: ("run", id, args), ("address",),
+    ("pair",), ("agent",), ("uninstall",), or None to quit."""
     def refresh():
         with locked():
             sync(link)
         return read_json(CACHE_FILE) or {}
 
-    cache = refresh()
-    account, index, action_index, message = None, 0, 0, ""
-    choice = None
-    narrowed = False
+    account, index, action_index = None, 0, 0
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
@@ -1099,9 +1140,10 @@ def cmd_menu():
         while True:
             size = shutil.get_terminal_size((80, 24))
             if size.columns < 40:
-                narrowed = True
-                break
-            sys.stdout.write(menu_screen(cache, link, account, index, action_index,
+                raise Fail("Terminal became too narrow. Widen it to 40 columns, then run `tokenstation` again.")
+            accounts = cache.get("accounts") or []
+            index = min(index, len(accounts))
+            sys.stdout.write(menu_screen(cache, link, view, account, index, action_index,
                                          message, size.columns, size.lines))
             sys.stdout.flush()
             key = menu_key(fd)
@@ -1110,53 +1152,115 @@ def cmd_menu():
                 cache = refresh()
                 if account is not None:
                     account = next((a for a in cache.get("accounts", []) if a["id"] == account["id"]), None)
-                index = min(index, max(0, len(cache.get("accounts", [])) - 1))
+                    if account is None:
+                        view = "accounts"
             elif key in ("q", "quit"):
-                break
+                return None
             elif key == "escape":
-                if account is None:
-                    break
-                account, action_index = None, 0
+                if view == "accounts":
+                    return None
+                view, account, action_index = "accounts", None, 0
             elif key in ("up", "k", "down", "j"):
                 delta = -1 if key in ("up", "k") else 1
-                if account is None:
-                    count = len(cache.get("accounts") or [])
-                    if count:
-                        index = (index + delta) % count
+                if view == "accounts":
+                    index = (index + delta) % (len(accounts) + 1)
                 else:
-                    action_index = (action_index + delta) % 4
+                    action_index = (action_index + delta) % (4 if view == "account" else len(SETTINGS_ACTIONS))
             elif key == "enter":
-                if account is None:
-                    accounts = cache.get("accounts") or []
-                    if accounts:
-                        selected = accounts[index]
-                        message = menu_reason(cache, selected) or ""
-                        if not message:
-                            account, action_index = selected, 0
-                elif action_index == 3:
-                    account, action_index = None, 0
-                else:
-                    reason = menu_reason(cache, account)
-                    if reason:
-                        message = reason
+                if view == "accounts":
+                    if index == len(accounts):
+                        view, action_index = "settings", 0
                     else:
-                        args = ([], ["--continue"], ["--resume"])[action_index]
-                        choice = str(account["id"]), args
-                        break
+                        message = menu_reason(cache, accounts[index]) or ""
+                        if not message:
+                            view, account, action_index = "account", accounts[index], 0
+                elif view == "account":
+                    if action_index == 3:
+                        view, account, action_index = "accounts", None, 0
+                    else:
+                        message = menu_reason(cache, account) or ""
+                        if not message:
+                            return ("run", str(account["id"]), ([], ["--continue"], ["--resume"])[action_index])
+                else:
+                    if action_index == 0:
+                        cache = refresh()
+                        message = cache.get("error") or f"The hub answered: {len(cache.get('accounts') or [])} accounts."
+                    elif action_index == 5:
+                        view, action_index = "accounts", 0
+                    else:
+                        return (None, "address", "pair", "agent", "uninstall")[action_index],
     except KeyboardInterrupt:
-        pass
+        return None
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
-    if choice:
-        cmd_run(*choice)
-    if narrowed:
-        raise Fail("Terminal became too narrow. Widen it to 40 columns, then run `hubclaude` again.")
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def cmd_menu():
+    """Interactive account, chat-mode and settings picker; pipes keep the plain list."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
+        return cmd_list()
+    if shutil.get_terminal_size((80, 24)).columns < 40:
+        raise Fail("Terminal is too narrow for the account picker. Widen it to 40 columns, or use `tokenstation list`.")
+    link = read_json(LINK_FILE)
+    if not link:
+        raise Fail("This Mac isn't paired with a hub: run the command from the hub's Machines › Add machine page.")
+    view, message = "accounts", ""
+    while True:
+        link = read_json(LINK_FILE)
+        if kc_read():
+            with locked():
+                sync(link)
+        cache = read_json(CACHE_FILE) or {}
+        if not kc_read():
+            cache["error"] = "The machine key is gone: choose Pair again."
+            view = "settings"
+        todo = menu_pick(link, cache, view, message)
+        view, message = "accounts", ""
+        if not todo:
+            return
+        try:
+            if todo[0] == "run":
+                return cmd_run(todo[1], todo[2])
+            if todo[0] == "address":
+                print(f"The hub is at {link['url']} now. The new address must show the same cert "
+                      f"({check_of(link['pin'])}).")
+                url = ask("New address (like kien-mac.local:8787, Enter keeps it): ")
+                if url:
+                    message = f"The hub is now at {move_address(url)['url']}."
+            elif todo[0] == "pair":
+                print("On the hub: Machines › Add machine shows a 6-digit code (any tab).")
+                code = ask("Code (Enter cancels): ")
+                if code:
+                    out = pair_with(link["url"], link["pin"], code)
+                    message = (f"Paired again as machine {out['machine_id']}. "
+                               "Revoke this Mac's old entry on the hub's Machines page.")
+            elif todo[0] == "agent":
+                cmd_service("install", os.environ.get("STATION_PYTHON"))
+                message = "The background agent is running." if agent_running() else "The agent did not start."
+            elif todo[0] == "uninstall":
+                if ask("Remove Token Station from this Mac? Type yes: ").lower() == "yes":
+                    return cmd_uninstall()
+                message = "Nothing removed."
+        except Fail as e:
+            message = str(e)
+            view = "settings"
+        else:
+            if todo[0] != "run":
+                view = "settings"
 
 
 def cmd_use(aid):
-    raise Fail("Token borrowing is disabled. Use `hubclaude run <id>` so the setup-token stays on the hub.")
+    raise Fail("Token borrowing is disabled. Use `tokenstation run <id>` so the setup-token stays on the hub.")
 
 
 def cmd_restore():
@@ -1242,13 +1346,14 @@ def cmd_uninstall():
     cmd_service("remove")
     cmd_forget()
     with_suppressed(os.remove, LOCK_FILE)
-    try:
-        with open(WRAPPER) as fh:
-            ours = CLIENT_DIR in fh.read()
-    except OSError:
-        ours = False
-    if ours:
-        with_suppressed(os.remove, WRAPPER)
+    for wrapper in (WRAPPER, OLD_WRAPPER):
+        try:
+            with open(wrapper) as fh:
+                ours = CLIENT_DIR in fh.read()
+        except OSError:
+            ours = False
+        if ours:
+            with_suppressed(os.remove, wrapper)
     if os.path.dirname(os.path.abspath(__file__)) == CLIENT_DIR:
         shutil.rmtree(CLIENT_DIR, ignore_errors=True)
     print("Token Station is off this Mac: its own Claude sign-in is back, the agent and the client are gone.\n"
