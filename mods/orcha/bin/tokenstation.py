@@ -20,9 +20,10 @@ On a Mac with no Orcherd, only a terminal (installed by the hub's
 
   tokenstation.py list                   the hub's accounts and the day
   tokenstation.py menu                   choose an account and chat mode in Terminal,
-                                         or change the hub's address, pair again, uninstall
+                                         or change the hub's address, pair again, update, uninstall
   tokenstation.py restore                undo an older token borrow, if any
   tokenstation.py service install|remove the agent that runs `sync` every minute
+  tokenstation.py update                 fetch this client again from the paired hub (pinned)
   tokenstation.py uninstall              restore, unpair, remove the agent and the client
 
 Files: ~/.config/orcherd/station.json (the hub's address, its cert pin, this
@@ -1051,7 +1052,8 @@ def menu_clip_left(head, path, columns):
 
 
 SETTINGS_ACTIONS = ("Check the hub now", "Change the hub's address", "Pair again (a code from the hub)",
-                    "Restart the background agent", "Uninstall Token Station", "Back to accounts")
+                    "Restart the background agent", "Update Token Station from the hub",
+                    "Uninstall Token Station", "Back to accounts")
 
 
 def agent_running():
@@ -1093,7 +1095,7 @@ def menu_screen(cache, link, view, account, index, action_index, message, column
             label = label + " " * (24 - menu_cells(label))
             lines.append(option(i, f"{item['id']:>3}  {label}  {state}", i == index, bool(reason)))
         lines.append("")
-        lines.append(option(len(accounts), "Hub & this Mac  (address, pair again, uninstall)", index == len(accounts)))
+        lines.append(option(len(accounts), "Hub & this Mac  (address, pair again, update, uninstall)", index == len(accounts)))
         lines += [paint(line, "2"), "↑↓ choose   Enter open   R refresh   Q quit"]
     elif view == "account":
         label = str(account.get("label") or "Account")
@@ -1124,7 +1126,7 @@ def menu_screen(cache, link, view, account, index, action_index, message, column
 def menu_pick(link, cache, view, message):
     """The picker itself, in the alternate screen. Returns what to do once
     the terminal is back to normal: ("run", id, args), ("address",),
-    ("pair",), ("agent",), ("uninstall",), or None to quit."""
+    ("pair",), ("agent",), ("update",), ("uninstall",), or None to quit."""
     def refresh():
         with locked():
             sync(link)
@@ -1185,10 +1187,10 @@ def menu_pick(link, cache, view, message):
                     if action_index == 0:
                         cache = refresh()
                         message = cache.get("error") or f"The hub answered: {len(cache.get('accounts') or [])} accounts."
-                    elif action_index == 5:
+                    elif action_index == 6:
                         view, action_index = "accounts", 0
                     else:
-                        return (None, "address", "pair", "agent", "uninstall")[action_index],
+                        return (None, "address", "pair", "agent", "update", "uninstall")[action_index],
     except KeyboardInterrupt:
         return None
     finally:
@@ -1247,6 +1249,8 @@ def cmd_menu():
             elif todo[0] == "agent":
                 cmd_service("install", os.environ.get("STATION_PYTHON"))
                 message = "The background agent is running." if agent_running() else "The agent did not start."
+            elif todo[0] == "update":
+                message = cmd_update()
             elif todo[0] == "uninstall":
                 if ask("Remove Token Station from this Mac? Type yes: ").lower() == "yes":
                     return cmd_uninstall()
@@ -1257,6 +1261,39 @@ def cmd_menu():
         else:
             if todo[0] != "run":
                 view = "settings"
+
+
+def cmd_update():
+    """Fetch this client again from the hub it is paired with, pinned like the
+    install, and swap it in only if it compiles. The agent's next sync and the
+    next `tokenstation` run the new one. Orcherd's copy comes with Orcherd."""
+    here = os.path.abspath(__file__)
+    if os.path.dirname(here) != CLIENT_DIR:
+        raise Fail("This copy of tokenstation.py comes with Orcherd: update Orcherd instead.")
+    link = read_json(LINK_FILE)
+    if not link:
+        raise Fail("This Mac isn't paired with a hub: run the command from the hub's Machines › Add machine page.")
+    tmp = here + ".part"
+    try:
+        r = subprocess.run(["curl", "-fsS", "-m", "30", "-k", "--pinnedpubkey", link["pin"], "-o", tmp,
+                            link["url"] + "/client/tokenstation.py"], capture_output=True, text=True, timeout=40)
+        if r.returncode != 0:
+            if "pinned" in r.stderr.lower() or r.returncode == 90:
+                raise Fail("The hub's cert is not the one paired: stop, something may be in between.")
+            raise Fail(f"The hub at {link['url']} did not answer ({r.stderr.strip()[:80]}).")
+        with open(tmp, "rb") as fh:
+            new = fh.read()
+        try:
+            compile(new, here, "exec")
+        except (SyntaxError, ValueError):
+            raise Fail("The hub sent a client that doesn't compile: this one is kept.")
+        with open(here, "rb") as fh:
+            same = fh.read() == new
+        os.replace(tmp, here)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return "Already the hub's version." if same else "Updated from the hub: the next tokenstation runs it."
 
 
 def cmd_use(aid):
@@ -1393,6 +1430,8 @@ def main(argv):
             cmd_restore()
         elif cmd == "service" and len(rest) in (1, 2):
             cmd_service(*rest)
+        elif cmd == "update" and not rest:
+            print(cmd_update())
         elif cmd == "uninstall" and not rest:
             cmd_uninstall()
         else:
