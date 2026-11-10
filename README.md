@@ -54,6 +54,12 @@ powershell -c "irm https://releases.herdr.dev/app/install.ps1 | iex"
 
 **Step 2.** Open **Herdr** from the Start menu. Its command palette is `Ctrl+Shift+P`, not `⌘⇧P`. You're on Windows, you knew that.
 
-**Step 3.** Want the whale on Windows? [Open an issue](https://github.com/trungkien1208/orcherd/issues) or 👍 one that's there. Loud demand moves whales. Watch **Releases** to hear when it lands.
+**Step 3.** Want the whale on Windows? Help it learn to swim 🏊: the port starts with knowing what a real Windows PC has. Download **orcherd-windows-probe.zip** from the [latest release](https://github.com/trungkien1208/orcherd/releases/latest), unzip it, then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File win-probe.ps1
+```
+
+It changes nothing and prints no secrets (for sign-in files: only whether they exist, their size and key names). Then copy the `probe-mod` folder to `%USERPROFILE%\.config\herdr-app\mods\orcha-probe`, and in Herdr: `Ctrl+Shift+P` → `mod.open` → **orcha-probe** → **Copy report**. [Open an issue](https://github.com/trungkien1208/orcherd/issues) with both reports (they show your user folder's name: blank it if you mind). Every report moves the whale closer. Watch **Releases** to hear when it lands.
 
 <sub>New: import projects from Cursor, Claude and Codex, ⌘F inside files, Codex and Cursor accounts, updates from the header · Before: worktrees in one card like Orca, dev servers with their ports, agents back after a crash, drag to reorder · Fuel and accounts are Orcherd's own, no terminal orcha needed · update = the pink 🐋 pill in the header (or Settings › 🐋 orcha), or run step 2 again · nerd stuff nobody reads: [click here 🥱](docs/BORING.md) · Apache-2.0 · the goat is Herdr's, the whale is ours 🍵</sub>

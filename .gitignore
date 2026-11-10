@@ -2,3 +2,5 @@
 __pycache__/
 mods/*/gpui-kit.d.ts
 mods/*/jsconfig.json
+tools/*/gpui-kit.d.ts
+tools/*/jsconfig.json
