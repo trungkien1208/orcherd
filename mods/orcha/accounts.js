@@ -1,10 +1,12 @@
 // ACCOUNTS (SPEC §3.2), opened from FUEL or the header: one row per account
 // with its plan limits. The account the agent in front of you runs on has the
 // heavy border, the yellow edge and IN USE; the one with the most fuel left is
-// BEST and gets the raised green SWITCH. SWITCH moves only the chat in front
-// of you (Settings › Hand-off says how, else it asks: keep running, restart,
-// new pane); keep running borrows the account's sign-in in the chat's folder,
-// with any chat sharing it, and FUEL shows it BORROWED.
+// BEST, gets the raised green SWITCH and the cursor, so Enter goes there.
+// SWITCH moves only the chat in front of you (Settings › Hand-off says how,
+// else it asks: keep running, restart, new pane); keep running borrows the
+// account's sign-in in the chat's folder, with any chat sharing it, and FUEL
+// shows it BORROWED. While it borrows, the account the chat is at home on
+// says HOME and its button is RETURN: the borrow ends, no restart.
 // Without an agent in front, SWITCH starts a new chat on the account. The
 // default account for new chats is Settings › Accounts' business, never this.
 // An account without fuel to read offers SIGN IN. + ADD ACCOUNT adds a Claude
@@ -21,12 +23,21 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, notify, setShared } from "herdr";
 import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
-import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable } from "./ui.js";
+import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable, agentFacts } from "./ui.js";
+
+// The fuel left on an account by its tighter limit, or null when none was read.
+function fuelOf(a) {
+  const windows = [fuelLeft(a.limits?.session), fuelLeft(a.limits?.weekly)].filter((v) => v != null);
+  return windows.length ? Math.min(...windows) : null;
+}
 
 export default class Accounts {
   constructor(cx) {
     this.list = [];
     this.at = 0;
+    this.placed = false; // the cursor was put on BEST (else IN USE) once the list was read
+    this.home = null; // the account the chat in front is at home on, while it borrows another
+    this.keep = { why: null, others: 0 };
     this.tab = "local";
     this.tabChosen = false;
     this.busy = null;
@@ -52,26 +63,51 @@ export default class Accounts {
       const { list, active } = await readAccounts();
       this.list = list;
       this.hasHub = list.some(isStation);
-      // What IN USE means: the account of the agent in front of you.
+      // What IN USE means: the account of the agent in front of you. The
+      // sidebar's last read of it shows at once; the pane's process confirms.
       const from = focusedAgent();
       const key = from?.program?.key ?? "claude";
-      if (key.includes("claude")) this.using = (from?.terminal && (await claudeAccountOf(from.terminal))) || active;
-      else this.using = list.find((a) => key.includes(a.kind))?.id ?? null;
-      if (this.hasHub && !this.tabChosen) {
-        this.tab = isStation(list.find((a) => a.id === this.using)) ? "hub" : "local";
-        this.tabChosen = true;
+      const claude = key.includes("claude");
+      const fact = claude && from?.terminal ? agentFacts().accounts?.[from.terminal] : null;
+      const place = (using) => {
+        this.using = using;
+        if (this.hasHub && !this.tabChosen) this.tab = isStation(list.find((a) => a.id === using)) ? "hub" : "local";
+        const visible = this.visible();
+        if (!this.placed) {
+          // Enter does what the green button says: the cursor starts on BEST.
+          const start = visible.findIndex((a) => a.id === this.best());
+          this.at = start >= 0 ? start : Math.max(0, visible.findIndex((a) => a.id === using));
+          this.placed = visible.length > 0;
+        }
+        if (this.at >= visible.length) this.at = Math.max(0, visible.length - 1);
+        cx.notify();
+      };
+      this.home = fact?.borrowed ? fact.seat : null;
+      place(claude ? fact?.id ?? active : list.find((a) => key.includes(a.kind))?.id ?? null);
+      // The slow reads, together: the pane's process (its account, what keep
+      // running would do: why not, or how many other chats move with it) and
+      // the Keychain, which keep running writes.
+      const [using, keep, keychain] = await Promise.all([
+        claude && from?.terminal ? claudeAccountOf(from.terminal) : null,
+        claude && from ? keepInfo(from) : { why: null, others: 0 },
+        list.some((a) => a.kind === "claude") ? readKeychain() : null,
+      ]);
+      this.keychain = keychain;
+      const blocked = keychainBlocks(keychain);
+      this.keep = blocked && !keep.why ? { ...keep, why: blocked } : keep;
+      if (using && using !== this.using) {
+        // The sidebar's read was behind (a switch just now): the borrow it knew is not this one.
+        this.home = null;
+        this.placed = false;
       }
-      // What keep running would do: why not, or how many other chats move with it.
-      this.keep = from && key.includes("claude") ? await keepInfo(from) : { why: null, others: 0 };
-      // Keep running writes the Keychain: it waits for it.
-      if (list.some((a) => a.kind === "claude")) this.keychain = await readKeychain();
-      const blocked = keychainBlocks(this.keychain);
-      if (blocked && !this.keep.why) this.keep = { ...this.keep, why: blocked };
-      const current = this.visible().findIndex((a) => a.id === this.using);
-      if (current >= 0 && this.at === 0) this.at = current;
-      if (this.at >= this.visible().length) this.at = Math.max(0, this.visible().length - 1);
-      cx.notify();
+      place(using || this.using);
+      this.tabChosen = true;
     });
+  }
+
+  // Whether SWITCH can't move a chat onto `a` now: the chat is on it, or `a` must sign in first.
+  held(a) {
+    return a.id === this.using || needsSignIn(a, [a.limits.session, a.limits.weekly, a.limits.monthly].filter(Boolean));
   }
 
   visible() {
@@ -87,17 +123,20 @@ export default class Accounts {
     cx.notify();
   }
 
-  // The Claude account with the most fuel left, by its tighter limit.
+  // The Claude account worth switching to: the most fuel left, by its
+  // tighter limit, and more than the one in use has. Only fuel that was read
+  // counts: an account that must sign in, or whose fuel is not known, is no
+  // promise. Null when the one in use is the best there is.
   best() {
     let best = null;
-    let most = -1;
     const using = this.list.find((a) => a.id === this.using);
+    let most = using?.kind === "claude" ? fuelOf(using) ?? -1 : -1;
     for (const a of this.visible()) {
-      if (a.kind !== "claude" || a.why) continue;
+      if (a.kind !== "claude" || a.why || this.held(a)) continue;
       // With a hub: the same Claude account under the other source is one fuel, no way out.
-      if (this.hasHub && using && a.id !== using.id && sameClaude(a, using)) continue;
-      const fuel = Math.min(fuelLeft(a.limits.session) ?? 100, fuelLeft(a.limits.weekly) ?? 100);
-      if (fuel > most) {
+      if (this.hasHub && using && sameClaude(a, using)) continue;
+      const fuel = fuelOf(a);
+      if (fuel != null && fuel > most) {
         most = fuel;
         best = a.id;
       }
@@ -133,6 +172,8 @@ export default class Accounts {
   switchTo(account, how, cx) {
     const from = focusedAgent();
     if (!from) return this.withoutAgent(account, cx);
+    // Enter on the row in use: the chat is there already.
+    if (account.id === this.using) return;
     const claudeToClaude = account.kind === "claude" && from.program?.key?.includes("claude");
     let way = claudeToClaude ? how ?? (this.mode === "ask" ? null : this.mode) : "new_pane";
     // Keep running can't here (or onto a hub account): ask instead, with why.
@@ -154,8 +195,9 @@ export default class Accounts {
       if (failed) notify({ title: "The chat did not move", body: failed, level: "error" });
       else {
         const moved = this.keep?.others ? `This chat and ${this.keep.others} more on the same folder` : "This chat";
-        const body = way === "keep" ? `${moved} keep running, borrowing its sign-in (FUEL says BORROWED). Claude picks it up within half a minute.` : way === "restart" ? "Only this chat: same pane, restarted on the account." : "A new agent opens beside the old one and sums up first.";
-        notify({ title: `The chat moves to ${account.label ?? account.id}`, body, level: "success", timeout: 5000 });
+        const back = way === "keep" && account.id === this.home;
+        const body = back ? `${moved} ${this.keep?.others ? "are" : "is"} back on ${this.keep?.others ? "their" : "its"} own account: nothing borrowed. Claude picks it up within half a minute.` : way === "keep" ? `${moved} keep${this.keep?.others ? "" : "s"} running, borrowing its sign-in (FUEL says BORROWED). Claude picks it up within half a minute. RETURN in ACCOUNTS ends the borrow.` : way === "restart" ? "Only this chat: same pane, restarted on the account." : "A new agent opens beside the old one and sums up first.";
+        notify({ title: back ? `The chat is back on ${account.label ?? account.id}` : `The chat moves to ${account.label ?? account.id}`, body, level: "success", timeout: 6000 });
         this.close();
       }
       cx.notify();
@@ -188,6 +230,9 @@ export default class Accounts {
     const inUse = a.id === this.using;
     const isBest = a.id === best && !inUse;
     const cursor = i === this.at;
+    // While the chat borrows: the account it is at home on, one click back.
+    const isHome = a.id === this.home && !inUse;
+    const enter = cursor ? " ↵" : "";
     const kindColor = a.kind === "claude" ? k.yellow : a.kind === "codex" ? k.green : a.kind === "cursor" ? k.blue : k.pink;
     const gauges = [
       fuelGauge(k, "5H", a.limits.session),
@@ -199,10 +244,12 @@ export default class Accounts {
     const action = busy
       ? div().text_size(11.5).text_color(k.dim).child("moving…")
       : needsSignIn(a, gauges)
-        ? button(k, `sign-${a.id}`, "SIGN IN", () => { signIn(a.id); this.close(); }, { small: true, primary: true })
+        ? button(k, `sign-${a.id}`, `SIGN IN${enter}`, () => { signIn(a.id); this.close(); }, { small: true, primary: true })
         : inUse
           ? chip(k, "IN USE", k.ink, k.paper)
-          : button(k, `switch-${a.id}`, isBest ? "SWITCH ↵" : "SWITCH", (_e, cx) => this.switchTo(a, null, cx), { primary: isBest, small: true });
+          : isHome
+            ? button(k, `switch-${a.id}`, `RETURN${enter}`, (_e, cx) => this.switchTo(a, this.keep?.why ? null : "keep", cx), { primary: true, small: true })
+            : button(k, `switch-${a.id}`, `SWITCH${enter}`, (_e, cx) => this.switchTo(a, null, cx), { primary: isBest, small: true });
     const choices = this.choosing === a.id
       ? h_flex()
           .gap(6)
@@ -213,12 +260,19 @@ export default class Accounts {
           .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: Boolean(this.keep?.why) || isStation(a) }))
           .child(button(k, `pane-${a.id}`, "NEW PANE", (_e, cx) => this.switchTo(a, "new_pane", cx), { small: true }))
       : null;
-    const keepNote =
-      this.choosing !== a.id ? null
-      : isStation(a) ? div().text_size(11).text_color(k.dim).child("No keep running on a hub account: its token lives only in claude's env, so it needs a restart. Restart goes on with this chat.")
-      : this.keep?.why ? div().text_size(11).text_color(k.dim).child(`No keep running: ${this.keep.why}`)
-      : this.keep?.others ? div().text_size(11).text_color(k.dim).child(`Keep running moves the ${this.keep.others + 1} chats on this folder together, no restart. Restart moves only this one.`)
-      : null;
+    // What each way does, in a line: nobody should have to try one to find out.
+    const keepLine = isStation(a) ? "No keep running on a hub account: its token lives only in claude's env."
+      : this.keep?.why ? `No keep running: ${this.keep.why}`
+      : this.keep?.others ? `Keep running: no restart, the ${this.keep.others + 1} chats on this folder move together, borrowing the account.`
+      : "Keep running: no restart, the chat borrows the account within half a minute.";
+    const keepNote = this.choosing !== a.id ? null
+      : v_flex()
+          .gap(1)
+          .text_size(11)
+          .text_color(k.dim)
+          .child(div().child(keepLine))
+          .child(div().child("Restart: same chat, only this pane, Claude starts again on the account."))
+          .child(div().child("New pane: a new agent beside this one reads notes and sums up first."));
     const body = h_flex()
       .id(`account-${a.id}`)
       .flex_none()
@@ -250,11 +304,13 @@ export default class Accounts {
               .items_center()
               .child(div().font_black().text_color(k.ink).child(a.label ?? a.id))
               .when(isBest, (el) => el.child(chip(k, "BEST", k.green)))
+              .when(isHome, (el) => el.child(chip(k, "HOME", k.pink)))
               // HUB / LOCAL only once a hub is paired: before that, nothing new shows.
               .when(this.hasHub && a.kind === "claude", (el) => el.child(chip(k, isStation(a) ? "HUB" : "LOCAL", isStation(a) ? k.blue : k.paper))),
           )
           .when(Boolean(a.why), (el) => el.child(div().text_size(11).text_color(readable(k, k.red)).child(`Can't start now: ${a.why}`)))
           .when(Boolean(a.email), (el) => el.child(div().text_size(11.5).text_color(k.dim).child(a.email)))
+          .when(isHome, (el) => el.child(div().text_size(11).text_color(k.dim).child("This chat's own account: it borrows the one in use. RETURN ends the borrow, no restart.")))
           .when(Boolean(a.limits.note), (el) => el.child(div().text_size(11).text_color(k.dim).child(a.limits.note)))
           .children(gauges.length || token?.idle ? gauges : [div().text_size(11.5).text_color(a.limits.error ? readable(k, k.red) : k.dim).child(a.limits.error ?? "no fuel read yet: sign in, then refresh")])
           .when(Boolean(token), (el) => el.child(div().text_size(11).text_color(token.signIn ? readable(k, k.red) : k.dim).child(token.text)))
@@ -388,8 +444,15 @@ export default class Accounts {
     if (!n) return;
     if (e.key === "down" || e.key === "j") this.at = (this.at + 1) % n;
     else if (e.key === "up" || e.key === "k") this.at = (this.at + n - 1) % n;
-    else if (e.key === "enter") this.switchTo(visible[this.at], null, cx);
-    else return;
+    else if (e.key === "enter") {
+      // What the cursor row's button says: SIGN IN, RETURN or SWITCH.
+      const a = visible[this.at];
+      if (a.id !== this.using && needsSignIn(a, [a.limits.session, a.limits.weekly, a.limits.monthly].filter(Boolean))) {
+        signIn(a.id);
+        return this.close();
+      }
+      this.switchTo(a, a.id === this.home && !this.keep?.why ? "keep" : null, cx);
+    } else return;
     cx.notify();
   }
 
@@ -422,7 +485,7 @@ export default class Accounts {
           .border_color(k.line)
           .child(icon("fuel", 18, k.ink))
           .child(div().font_black().text_size(14).text_color(k.ink).child("ACCOUNTS"))
-          .child(div().flex_1().truncate().text_size(12).text_color(k.muted).child(focusedAgent() ? "switch moves the chat in front of you" : "switch starts a new chat on the account"))
+          .child(div().flex_1().truncate().text_size(12).text_color(k.muted).child(!focusedAgent() ? "switch starts a new chat on the account" : this.home ? "this chat borrows the account in use · RETURN ends it" : "switch moves the chat in front of you"))
           .child(
             div()
               .id("accounts-close")
@@ -464,7 +527,7 @@ export default class Accounts {
           .border_t(2.5)
           .border_color(k.line)
           .text_size(11.5)
-          .child(keyHint("↵", "switch"))
+          .child(keyHint("↵", focusedAgent() ? "switch" : "new chat"))
           .child(keyHint("↑↓", "move"))
           .when(this.tab !== "hub", (el) => el.child(keyHint("a", "add")))
           .child(keyHint("r", this.busy === "refresh" ? "refreshing…" : "refresh"))

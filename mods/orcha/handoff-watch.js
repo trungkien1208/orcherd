@@ -6,7 +6,7 @@
 // account with the most fuel, once the agent is between turns. Each mark
 // fires once per account and plan window.
 
-import { agents, notify, setShared } from "herdr";
+import { agents, notify } from "herdr";
 import { fuelLeft, agentFacts } from "./ui.js";
 import { readAccounts, readHandoff, keepRunningOn, handOff, restartOn, askForChecklist, focusedAgent, claudeAccountOf, isStation, sameClaude } from "./accounts-data.js";
 
@@ -59,14 +59,13 @@ export default class HandoffWatch {
         return;
       }
       if (h.low_fuel_percent && now.left < h.low_fuel_percent && once("offer")) {
-        // Settings opens on Accounts for a couple of minutes after this.
-        setShared("orcha.openSection", { id: "accounts", until: Date.now() + 120000 });
+        // The click opens ACCOUNTS, where SWITCH moves the chat: the cursor is on the best one.
         notify({
           title: `${label} has ${now.left}% left`,
-          body: best ? `${best.label ?? best.id} has ${fuel(best).left}%. Click to switch, or use HAND OFF in Accounts.` : "Click to see your accounts.",
+          body: best ? `${best.label ?? best.id} has ${fuel(best).left}%. Click, then Enter moves this chat to it.` : "Click to see your accounts.",
           level: "warning",
           timeout: 15000,
-          action: { name: "orcha.settings" },
+          action: { name: "orcha.accounts" },
         });
       }
       if (h.checklist_percent && now.left < h.checklist_percent && focusedAgent() && once("checklist")) {

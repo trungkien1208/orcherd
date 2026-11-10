@@ -3,7 +3,8 @@
 nothing of the terminal orcha, and keeps its files apart from it.
 
   accounts.py json [fresh]          every account's fuel into the cache; fresh: ask past the cache
-  accounts.py whoami <dir|->        the account Claudes reading config folder <dir> run on (-: ~/.claude)
+  accounts.py whoami <dir|->...     the account Claudes reading config folder <dir> run on (-: ~/.claude),
+                                    one line per folder
   accounts.py switch-dir <id> <dir|->   move the Claudes reading <dir> onto that account, no restart
   accounts.py activate <id>         make that Claude account the one every default Claude uses
   accounts.py link <id>             link ~/.claude's shared files into a Claude account's folder
@@ -115,6 +116,7 @@ def state_lock():
     make_dir(CONFIG_DIR)
     with open(os.path.join(CONFIG_DIR, ".lock"), "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
+        _KC_READ.clear()  # what was read before the lock may have changed since
         yield
 
 
@@ -262,10 +264,18 @@ def unowned_service(service):
     return "orcherd-claude-unowned-" + hashlib.sha256(service.encode()).hexdigest()[:8]
 
 
+# One run asks for the same item many times over (who holds it, which copy
+# is freshest, its fuel): each is read from the Keychain once. kc_write and
+# a sign-in made by Claude meanwhile (cmd_login) forget what was read.
+_KC_READ = {}
+
+
 def keychain_read(service):
-    r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
-                       capture_output=True, text=True, timeout=10)
-    return r.stdout.rstrip("\n") if r.returncode == 0 and r.stdout.strip() else None
+    if service not in _KC_READ:
+        r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
+                           capture_output=True, text=True, timeout=10)
+        _KC_READ[service] = r.stdout.rstrip("\n") if r.returncode == 0 and r.stdout.strip() else None
+    return _KC_READ[service]
 
 
 # When Claude can't write the Keychain (locked, a broken login keychain, a
@@ -333,7 +343,9 @@ def kc_write(service, account, secret):
     except ValueError:
         pass
     cmd = f'add-generic-password -U -s "{service}" -a "{account}" -X {secret.encode().hex()}\n'
+    _KC_READ.pop(service, None)
     r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=10)
+    _KC_READ.pop(service, None)
     if r.returncode != 0 or keychain_read(service) != secret:
         raise RuntimeError(KEYCHAIN_WRITE_FAILED)
 
@@ -647,10 +659,32 @@ def retry_at(path):
         return 0.0
 
 
+WINDOWS = ("session", "weekly", "monthly")
+
+
+def kept_numbers(cached, idle):
+    """The last numbers read (`at`), for while no new ones can be: a window
+    that reset since counts as full again. Idle (no request can be made until
+    the account's next chat): marked so, with when they were read."""
+    ours = cached.get("idle")  # the note below is ours then, not the fetcher's
+    out = {k: v for k, v in cached.items() if k != "idle" and not (k == "note" and ours)}
+    now = time.time()
+    for name in WINDOWS:
+        entry = out.get(name)
+        if isinstance(entry, list) and len(entry) == 2 and isinstance(entry[1], (int, float)) and entry[1] < now:
+            out[name] = [0.0, None]
+    if idle:
+        out["idle"] = True
+        if isinstance(out.get("at"), (int, float)):
+            out["note"] = "last read " + datetime.fromtimestamp(out["at"]).strftime("%a %H:%M")
+    return out
+
+
 def get(acct, fresh=False):
     """The account's limits, cached for CACHE_TTL. A request that fails for a
-    while (rate limited, offline) keeps the last numbers and backs off, so the
-    fuel gauge does not flip to an error every few minutes."""
+    while (rate limited, offline) or can't be made (an idle sign-in) keeps the
+    last numbers and backs off, so the fuel gauge does not flip to an error
+    every few minutes."""
     make_dir(CACHE_DIR)
     path = os.path.join(CACHE_DIR, acct + ".json")
     retry = path + ".retry"
@@ -660,7 +694,7 @@ def get(acct, fresh=False):
     def waits(cached, age):
         if fresh or cached is None:
             return False
-        idle = cached.get("error") == T["err_idle"]
+        idle = cached.get("error") == T["err_idle"] or cached.get("idle")
         return (age < CACHE_TTL and not idle) or retry_at(retry) > time.time()
     cached, age = read_cache(path)
     if waits(cached, age):
@@ -681,17 +715,34 @@ def get(acct, fresh=False):
                 wait = RATE_LIMIT_RETRY_AFTER if data.pop("rate_limited", False) else RETRY_AFTER
                 atomic_write(retry, str(time.time() + wait))
             if cached is not None and "error" not in cached:
-                return cached
+                kept = kept_numbers(cached, data.get("error") == T["err_idle"])
+                if kept != cached:
+                    atomic_write(path, json.dumps(kept))
+                return kept
         else:
             with contextlib.suppress(OSError):
                 os.remove(retry)
+            if "error" not in data:
+                data["at"] = time.time()
         atomic_write(path, json.dumps(data))
         return data
 
 
 def forget_fuel(acct):
+    """A new sign-in may be someone else's plan: the old numbers go."""
     with contextlib.suppress(OSError):
         os.remove(os.path.join(CACHE_DIR, acct + ".json"))
+
+
+def expire_fuel(acct):
+    """The account's sign-in moved: its fuel is asked again on the next read,
+    past the cache and any back-off. The last numbers stay until then (and
+    after, when the sign-in is idle)."""
+    path = os.path.join(CACHE_DIR, acct + ".json")
+    with contextlib.suppress(OSError):
+        os.utime(path, (0, 0))
+    with contextlib.suppress(OSError):
+        os.remove(path + ".retry")
 
 
 def write_token(acct):
@@ -813,7 +864,7 @@ def cmd_activate(acct):
     kc_write(DEFAULT_SERVICE, account_attr, source)
     set_default_profile(acct)
     write_line(ACTIVE_FILE, acct)
-    forget_fuel(acct)
+    expire_fuel(acct)
     cmd_select(acct)
 
 
@@ -852,7 +903,7 @@ def switch_claude_dir(acct, d):
     state_path = os.path.join(os.path.expanduser(d), ".claude.json")
     if profile and os.path.exists(state_path):
         set_profile(state_path, profile)
-    forget_fuel(acct)
+    expire_fuel(acct)
     nudge_claude(d)
     cmd_select(acct)
 
@@ -956,6 +1007,7 @@ def cmd_login(acct):
             print(f"  {cmd[0]} is not installed.")
         else:
             done = subprocess.run([path] + cmd[1:], env=env_for(acct))
+            _KC_READ.clear()  # Claude wrote the new sign-in meanwhile
     except KeyboardInterrupt:
         done = None
     finally:
@@ -991,7 +1043,8 @@ def main():
     if cmd == "json":
         cmd_json(args[1:] == ["fresh"])
     elif cmd == "whoami" and len(args) > 1:
-        print(dir_account(None if args[1] == "-" else args[1]) or "")
+        for d in args[1:]:
+            print(dir_account(None if d == "-" else d) or "")
     elif cmd in MUTATING and (cmd == "keychain-move" or (len(args) > 1 and args[1] in ACCOUNTS)):
         with state_lock():
             if cmd == "switch-dir" and len(args) > 2:

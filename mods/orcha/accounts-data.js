@@ -36,14 +36,20 @@ const DEFAULT_FILE = () => configFile("claude-default");
  *  folder now (`active`) and the default one (`main`, the same unless the
  *  main folder's chats are borrowing). */
 export async function readAccounts() {
-  const config = await readJson(CONFIG());
-  const active = (await readTextFile(configFile("claude-active")))?.trim() ?? null;
-  const main = (await readTextFile(DEFAULT_FILE()))?.trim() || active;
-  const list = [];
-  for (const account of config?.accounts ?? []) {
-    const cache = cacheFile(`limits/${account.id}`);
-    list.push({ ...account, limits: (await readJson(`${cache}.json`)) ?? {}, token: await readJson(`${cache}.token.json`) });
-  }
+  const [config, activeFile, defaultFile] = await Promise.all([readJson(CONFIG()), readTextFile(configFile("claude-active")), readTextFile(DEFAULT_FILE())]);
+  const local = (config?.accounts ?? []).filter((a) => a?.id);
+  const known = (id) => (local.some((a) => a.id === id) ? id : null);
+  // As accounts.py has it: until an account is put in the main folder, the
+  // one that lives there (no folder of its own) is in it.
+  const active = known(activeFile?.trim()) ?? local.find((a) => a.kind === "claude" && !a.dir)?.id ?? null;
+  const main = known(defaultFile?.trim()) ?? active;
+  const list = await Promise.all(
+    local.map(async (account) => {
+      const cache = cacheFile(`limits/${account.id}`);
+      const [limits, token] = await Promise.all([readJson(`${cache}.json`), readJson(`${cache}.token.json`)]);
+      return { ...account, limits: limits ?? {}, token };
+    }),
+  );
   list.push(...(await readStationAccounts(list)));
   return { list, active, main };
 }
@@ -253,6 +259,25 @@ async function configFolders(terminals) {
 
 const configFolder = async (terminal) => (await configFolders([terminal]))[0];
 
+// The account whose sign-in is in each config folder now ("-": the main
+// one), in order; null when not known. A hub folder is its hub account's;
+// the others are asked of accounts.py, all in one run.
+async function holdersOf(folders) {
+  const hub = (f) => f.startsWith(STATION_DIR());
+  const out = folders.map((f) => (hub(f) ? `station-${stationIdOf(f)}` : null));
+  const ask = folders.filter((f) => !hub(f));
+  if (!ask.length) return out;
+  const r = await exec("python3", ["-I", LIMITS(), "whoami", ...ask]);
+  const lines = r.code === 0 ? r.stdout.split("\n") : [];
+  let n = 0;
+  folders.forEach((f, i) => {
+    if (!hub(f)) out[i] = lines[n++]?.trim() || null;
+  });
+  return out;
+}
+
+const holderOf = async (folder) => (await holdersOf([folder]))[0];
+
 /** Which Claude account each Claude pane runs on, by terminal:
  *  { id, label, other, borrowed, seat }. `other`: not the default account
  *  (the main folder's). `borrowed`: the pane's folder belongs to another
@@ -264,11 +289,8 @@ export async function readPaneAccounts() {
   if (!claudes.length) return {};
   const folders = await configFolders(claudes.map((p) => p.terminal));
   const unique = [...new Set(folders)];
-  const holders = await Promise.all(unique.map((f) => (f.startsWith(STATION_DIR())
-    ? Promise.resolve(`station-${stationIdOf(f)}`)
-    : exec("python3", ["-I", LIMITS(), "whoami", f]).then((r) => (r.code === 0 ? r.stdout.trim() || null : null)))));
+  const [holders, { list, main }] = await Promise.all([holdersOf(unique), readAccounts()]);
   const holderOf = new Map(unique.map((f, i) => [f, holders[i]]));
-  const { list, main } = await readAccounts();
   const out = {};
   claudes.forEach((p, i) => {
     const folder = folders[i];
@@ -285,10 +307,7 @@ export async function readPaneAccounts() {
 
 /** The account a terminal's Claude runs on, or null. */
 export async function claudeAccountOf(terminal) {
-  const folder = await configFolder(terminal);
-  if (folder.startsWith(STATION_DIR())) return `station-${stationIdOf(folder)}`;
-  const r = await exec("python3", ["-I", LIMITS(), "whoami", folder]);
-  return r.code === 0 ? r.stdout.trim() || null : null;
+  return holderOf(await configFolder(terminal));
 }
 
 /** What keeping `from`'s chat running on another account would do: a
@@ -310,6 +329,10 @@ export async function keepRunningOn(account, from) {
   if (isStation(account)) return "A running chat needs a restart to use a hub account: its relay endpoint is set when Claude Code starts. Restart the chat onto it, or open a new pane.";
   const { why } = await keepInfo(from);
   if (why) return why;
+  // Whoever asks (ACCOUNTS, the low-fuel watch): a Keychain that can't take
+  // the sign-in would leave the chat where it was, with a note saying it moved.
+  const blocked = keychainBlocks(await readKeychain());
+  if (blocked) return blocked;
   const folder = await configFolder(from.terminal);
   // Borrowing on the main folder: remember the default first, so it stays.
   if (folder === "-" && !(await readTextFile(DEFAULT_FILE()))?.trim()) {
@@ -335,22 +358,27 @@ export async function startOn(account) {
     return null;
   }
   const dir = claudeDir(account);
-  const why = await mainFolderTaken(account, dir);
+  const why = await folderTaken(account);
   if (why) return why;
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
   run("tab.new", { argv: dir ? ["env", `CLAUDE_CONFIG_DIR=${dir}`, "claude"] : ["claude"] });
   return null;
 }
 
-// An account without a folder of its own runs on the main one, which holds
-// whichever account is the default: why `account` can't run there now, or null.
-async function mainFolderTaken(account, dir) {
-  if (dir) return null;
-  const holder = (await exec("python3", ["-I", LIMITS(), "whoami", "-"])).stdout.trim();
+// A chat started in a Claude account's folder runs on whichever sign-in is in
+// that folder now: another account's, after a chat there was kept running on
+// it (or, in the main folder, after the default changed). Why `account`
+// can't start in its folder now, or null. Starting anyway would open a chat
+// that says one account and burns another.
+async function folderTaken(account) {
+  const dir = claudeDir(account);
+  const holder = await holderOf(dir ?? "-");
   if (holder === account.id) return null;
   const { list } = await readAccounts();
+  const name = account.label ?? account.id;
   const other = list.find((a) => a.id === holder)?.label ?? "another account";
-  return `${account.label ?? account.id} has no folder of its own and the main one holds ${other}. Make it the default in Settings › Accounts first.`;
+  if (!dir) return `${name} lives in the main Claude folder (~/.claude), and ${other} is in it now. Make ${name} the default (Settings › Accounts), or KEEP RUNNING a chat onto it.`;
+  return `${name}'s folder is lent to ${other} now: a chat there was kept running on it. RETURN that chat first (ACCOUNTS, from that chat), or KEEP RUNNING this chat onto ${name}.`;
 }
 
 /** "Personal Mac" → "personal-mac" (orcha's account_slug). */
@@ -524,7 +552,7 @@ export async function handOff(account, { checklistFile = HANDOFF_DEFAULTS.checkl
     argv = ["python3", "-I", STATION(), "run", account.stationId, ...argv.slice(1)];
   } else {
     const dir = account.kind === "claude" ? claudeDir(account) : null;
-    const taken = account.kind === "claude" ? await mainFolderTaken(account, dir) : null;
+    const taken = account.kind === "claude" ? await folderTaken(account) : null;
     if (taken) return taken;
     if (dir) {
       await exec("python3", ["-I", LIMITS(), "link", account.id]);
@@ -553,16 +581,8 @@ export async function restartOn(account) {
     return typeContinue(from, `python3 -I '${STATION().replace(/'/g, "'\\''")}' run ${account.stationId} --continue`);
   }
   const dir = claudeDir(account);
-  const owner = await exec("python3", ["-I", LIMITS(), "whoami", dir ?? "-"]);
-  const holder = owner.stdout.trim();
-  if (holder !== account.id) {
-    // Say who holds the folder and the way out, not just "no".
-    const { list } = await readAccounts();
-    const name = account.label ?? account.id;
-    const other = list.find((a) => a.id === holder)?.label ?? "another account";
-    if (!dir) return `${name} uses the main Claude folder (~/.claude), and ${other} is in it now. Make ${name} the default (Settings › Accounts), or keep this chat running on it.`;
-    return `${name}'s folder holds ${other} now. Keep the chat running on ${name} instead.`;
-  }
+  const taken = await folderTaken(account);
+  if (taken) return taken;
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
   if (fromFolder.startsWith(STATION_DIR())) await adopt(dir ?? "-");
   // Typed into the pane's shell: the folder quoted, so a space or a quote in it stays a name.

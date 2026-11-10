@@ -1251,9 +1251,11 @@ export default class Settings {
   loadAccounts(cx) {
     cx.spawn(async (cx) => {
       // ✓ default: the default account, even while the main folder borrows another.
-      const { list, main } = await readAccounts();
+      // mainOn: the account in the main folder now, another one while its chats borrow.
+      const { list, main, active } = await readAccounts();
       this.orcha.accounts = list;
       this.orcha.active = main;
+      this.orcha.mainOn = active;
       this.orcha.station = await stationStatus();
       cx.notify();
     });
@@ -1264,11 +1266,14 @@ export default class Settings {
     this.orcha.busy[a.id] = true;
     cx.notify();
     cx.spawn(async (cx) => {
+      const back = this.orcha.active === a.id; // the default already: its chats return from a borrow
       const failed = await makeDefault(a.id);
       delete this.orcha.busy[a.id];
       if (!failed) {
         this.orcha.active = a.id;
-        notify({ title: `${a.label ?? a.id} is the default now`, body: "New chats start on it. Chats you moved in their pane (👤) keep their own.", level: "success", timeout: 5000 });
+        this.orcha.mainOn = a.id;
+        setShared("orcha.fuelRev", Date.now());
+        notify({ title: back ? `Back on ${a.label ?? a.id}` : `${a.label ?? a.id} is the default now`, body: "New chats start on it, and the chats in the main folder (~/.claude) move to it within half a minute. A chat started in another account's folder stays there.", level: "success", timeout: 6000 });
       } else notify({ title: "The default was not changed", body: failed, level: "error" });
       cx.notify();
     });
@@ -1286,10 +1291,12 @@ export default class Settings {
         .child(this.button(t, "accounts-hub", hubTab ? "Hub ✓" : "Hub", (_e, cx) => { this.orcha.accountTab = "hub"; cx.notify(); })))
       .child(div().pb(6).text_size(12.5).text_color(t.dim).child(hubTab
         ? "Hub accounts run through Token Station. Start day on the hub before opening a chat."
-        : "Local accounts use this Mac's sign-ins. The default is used by new Claude chats; 👤 moves one chat."));
+        : "Local accounts use this Mac's sign-ins. New Claude chats start on the default. To move the chat in front of you, open ACCOUNTS: click FUEL, or 👤 in the header."));
     if (hubTab) out.child(this.stationSection(t));
     for (const a of (this.orcha.accounts ?? []).filter((a) => isStation(a) === hubTab)) {
       const inUse = a.kind === "claude" && a.id === this.orcha.active;
+      // The default's chats were kept running on another account: the main folder holds that one now.
+      const lent = inUse && this.orcha.mainOn && this.orcha.mainOn !== a.id ? (this.orcha.accounts ?? []).find((x) => x.id === this.orcha.mainOn) ?? null : null;
       const gauges = [fuelGauge(k, "5H", a.limits.session), fuelGauge(k, "WEEK", a.limits.weekly), fuelGauge(k, "MONTH", a.limits.monthly)].filter(Boolean);
       const token = tokenState(a);
       const control =
@@ -1299,10 +1306,10 @@ export default class Settings {
           ? this.button(t, `acc-sign-${a.id}`, "Sign in", () => { closeOverlay(props()?.overlay); signIn(a.id); })
           : a.kind !== "claude"
           ? div()
-          : inUse
-            ? div().text_size(12.5).text_color(t.done).child("✓ default")
-            : this.orcha.busy[a.id]
-              ? div().text_size(12.5).text_color(t.dim).child("changing…")
+          : this.orcha.busy[a.id]
+            ? div().text_size(12.5).text_color(t.dim).child("changing…")
+            : inUse
+              ? h_flex().gap(10).items_center().child(div().text_size(12.5).text_color(t.done).child("✓ default")).when(Boolean(lent), (el) => el.child(this.button(t, `acc-return-${a.id}`, "Return", (_e, cx) => this.useAccount(a, cx))))
               : this.button(t, `acc-${a.id}`, "Make default", (_e, cx) => this.useAccount(a, cx));
       out.child(
         v_flex()
@@ -1318,6 +1325,7 @@ export default class Settings {
               .child(v_flex().flex_1().min_w(0).child(div().text_size(14).text_color(t.foreground).child(a.label ?? a.id)).child(div().text_size(12.5).text_color(t.dim).child(a.email ?? a.limits.note ?? "")).when(Boolean(token), (el) => el.child(div().text_size(12).text_color(token.signIn ? t.blocked : t.dim).child(token.text))))
               .child(control),
           )
+          .when(Boolean(lent), (el) => el.child(div().text_size(12).text_color(t.muted).child(`Its chats in the main folder (~/.claude) borrow ${lent.label ?? lent.id} now, and new chats start there too. Return puts them back on ${a.label ?? a.id}, no restart.`)))
           .children(gauges),
       );
     }
@@ -1625,7 +1633,7 @@ export default class Settings {
     return v_flex()
       .w_full()
       .child(this.heading(t, "Before an account runs dry"))
-      .child(div().pb(4).text_size(12.5).line_height("18px").text_color(t.dim).child("Three marks on the fuel of the account in use. Under each one, orcha does a bit more to keep your work going. HAND OFF in Accounts does it any time."))
+      .child(div().pb(4).text_size(12.5).line_height("18px").text_color(t.dim).child("Three marks on the fuel of the account in use. Under each one, orcha does a bit more to keep your work going. SWITCH in ACCOUNTS (click FUEL) moves a chat any time."))
       .child(this.handoffBar(h))
       .child(percent("checklist_percent", "The agent in front of you writes what is done and what is next to the checklist file, so the next one can pick up.", "Ask for a checklist under"))
       .child(percent("low_fuel_percent", "A note offers to move the chat to the account with the most fuel.", "Offer to switch under"))

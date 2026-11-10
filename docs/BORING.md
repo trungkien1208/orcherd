@@ -48,10 +48,13 @@ You clicked. Respect. Here's everything nobody reads.
 ## Accounts, switching and hand-off
 
 - **SWITCH** moves the chat in front of you to an account. Claude to Claude asks how, unless Settings › Hand-off already says:
-  - **Keep running**: same chat, no restart; Claude picks up the new sign-in within half a minute. Every chat started in the same folder moves with it.
+  - **Keep running**: same chat, no restart; Claude picks up the new sign-in within half a minute. Every chat started in the same folder moves with it. The chat borrows the account: FUEL says BORROWED, and in ACCOUNTS its own account says HOME, where **RETURN** ends the borrow.
   - **Restart**: same chat, Claude starts again on the account. Only this pane moves.
   - **New pane**: a new agent opens beside the old one with short notes, sums up and waits for your go.
   - Another kind of agent (Codex, Cursor) always gets a new pane.
+- Open ACCOUNTS and press Enter: the cursor starts on **BEST**, the account with more fuel than the one in use. Fuel that could not be read is never BEST.
+- An account that sits idle keeps its last numbers ("last read Tue 09:38"); a window that reset since counts as full.
+- **Settings › Accounts** shows the default with a **Return** button while the main folder's chats borrow another account: new chats start on the borrowed one until then.
 - **Two accounts in two projects at once?** Yes: open Claude normally in one, and in the other SWITCH with **Restart** or **New pane**.
 - **ADD ACCOUNT** (`a`): name it, sign in in the pane that opens. Chats, settings and skills are shared between accounts.
 - **SIGN IN** shows when orcha can't read an account's fuel, with the reason. `r` asks every account right now.

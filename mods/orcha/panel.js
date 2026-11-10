@@ -170,7 +170,7 @@ export default class Panel {
         label: account.label ?? account.id,
         email: owner ? null : account.email ?? null,
         chip: owner ? "🤝 BORROWED" : null,
-        sub: owner ? `${short(owner)}'s chat, running on ${short(account)}'s tokens` : null,
+        sub: owner ? `${short(owner)}'s chat, running on ${short(account)}'s tokens · click, then RETURN ends it` : null,
         limits,
       };
       cx.notify();
