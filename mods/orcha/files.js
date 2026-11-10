@@ -2,14 +2,17 @@
 // a search box over the whole project, by file name (NAME) or by what is
 // inside the files (TEXT). Clicking a file opens it in the viewer beside your
 // work (viewer.js); the same viewer is reused while it is open in the tab.
+// Right-click a file or a folder: open it in the editor, its app or Finder,
+// a new tab in a folder, copy its path (menu.js).
 //
 // The tree is adapted from Herdr's own `files` mod (Apache-2.0, see NOTICE).
 // Search runs ripgrep when it is installed, else git or grep.
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, run, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, run, shared, setShared, openOverlay } from "herdr";
 import { tokens, icon, readable } from "./ui.js";
+import { menuHeight } from "./menu.js";
 
 const PER_FOLDER = 500;
 const TOTAL = 5000;
@@ -199,6 +202,15 @@ export default class Files {
     });
   }
 
+  // Right-click: the menu for a file or a folder (`rel`: its path in the project).
+  menu(rel, dir, extra = {}) {
+    return (_e, cx) => {
+      cx.stop_propagation();
+      const target = { kind: "file", root: this.projectRoot, rel, dir, on: this.on ?? null, name: rel.split("/").pop(), ...extra };
+      openOverlay({ mod: "orcha", props: { part: "menu", target }, kind: "popup", at: "pointer", frame: "none", width: 230, height: menuHeight(target) });
+    };
+  }
+
   toggle(path, cx) {
     if (this.folders.has(path)) {
       for (const folder of [...this.folders]) {
@@ -280,6 +292,7 @@ export default class Files {
           .cursor_pointer()
           .hover((s) => s.bg(k.hover))
           .on_click((_e, cx) => (entry.dir ? this.toggle(path, cx) : openFile(this.projectRoot, `${this.relative()}${path}`, this.on)))
+          .on_mouse_down("right", this.menu(`${this.relative()}${path}`, entry.dir))
           .child(entry.dir ? icon(open ? "chevron-down" : "chevron-right", 11, k.dim) : div().w(11).flex_none())
           .child(icon(entry.dir ? "folder" : "file", 13, entry.dir ? k.ink : k.muted))
           .child(div().flex_1().min_w(0).truncate().text_color(k.foreground).child(entry.name))
@@ -310,6 +323,7 @@ export default class Files {
       .cursor_pointer()
       .hover((s) => s.bg(k.hover))
       .on_click(() => openFile(this.projectRoot, r.path, this.on, this.mode === "text" ? this.query.trim() : null))
+      .on_mouse_down("right", this.menu(r.path, false, { query: this.mode === "text" ? this.query.trim() : null, line: r.line ?? null }))
       .child(
         h_flex()
           .gap(6)

@@ -22,7 +22,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, notify, setShared } from "herdr";
-import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, renameAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
 import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable, agentFacts } from "./ui.js";
 
 // The fuel left on an account by its tighter limit, or null when none was read.
@@ -48,6 +48,9 @@ export default class Accounts {
     this.confirmMove = false;
     this.nameInput = InputState.new({ placeholder: "name, like personal or work" });
     this.nameInput.on("submit", (_e, cx) => this.add(cx));
+    this.renaming = null; // account id whose name is being typed (e)
+    this.renameInput = InputState.new({ placeholder: "the account's name" });
+    this.renameInput.on("submit", (_e, cx) => this.rename(cx));
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.timer.after(300, () => this.handle.focus());
@@ -120,6 +123,7 @@ export default class Accounts {
     this.at = 0;
     this.choosing = null;
     this.adding = false;
+    this.renaming = null;
     cx.notify();
   }
 
@@ -162,6 +166,30 @@ export default class Accounts {
         this.nameInput.set_value("");
         notify({ title: "Sign in beside your work", body: "When it says you're in, press Enter there.", level: "success", timeout: 6000 });
         this.close();
+      }
+      this.load(cx);
+    });
+  }
+
+  // e: another name for the account under the cursor (a hub account is named on the hub).
+  startRename(a, cx) {
+    if (!a || isStation(a)) return;
+    this.renaming = a.id;
+    this.renameInput.set_value(a.label ?? a.id);
+    this.renameInput.focus();
+    cx.notify();
+  }
+
+  rename(cx) {
+    const id = this.renaming;
+    if (!id) return;
+    cx.spawn(async (cx) => {
+      const failed = await renameAccount(id, this.renameInput.value());
+      if (failed) notify({ title: "The name was not changed", body: failed, level: "error" });
+      else {
+        this.renaming = null;
+        this.handle.focus();
+        setShared("orcha.fuelRev", Date.now());
       }
       this.load(cx);
     });
@@ -302,7 +330,10 @@ export default class Accounts {
             h_flex()
               .gap(6)
               .items_center()
-              .child(div().font_black().text_color(k.ink).child(a.label ?? a.id))
+              .child(this.renaming === a.id
+                ? Input.new(this.renameInput).flex_1().min_w(0).h(24).px(6).rounded(5).border(2).border_color(k.line).bg(k.paper).text_size(12.5).text_color(k.ink)
+                : div().font_black().text_color(k.ink).child(a.label ?? a.id))
+              .when(this.renaming === a.id, (el) => el.child(div().flex_none().text_size(10.5).text_color(k.dim).child("↵ save · esc")))
               .when(isBest, (el) => el.child(chip(k, "BEST", k.green)))
               .when(isHome, (el) => el.child(chip(k, "HOME", k.pink)))
               // HUB / LOCAL only once a hub is paired: before that, nothing new shows.
@@ -425,9 +456,10 @@ export default class Accounts {
   key(e, cx) {
     const visible = this.visible();
     const n = visible.length;
-    if (this.adding) {
+    if (this.adding || this.renaming) {
       if (e.key !== "escape") return;
       this.adding = false;
+      this.renaming = null;
       this.handle.focus();
       cx.notify();
       return;
@@ -442,6 +474,7 @@ export default class Accounts {
     if (e.key === "a") return;
     if (e.key === "r") return this.refresh(cx);
     if (!n) return;
+    if (e.key === "e") return this.startRename(visible[this.at], cx);
     if (e.key === "down" || e.key === "j") this.at = (this.at + 1) % n;
     else if (e.key === "up" || e.key === "k") this.at = (this.at + n - 1) % n;
     else if (e.key === "enter") {
@@ -529,7 +562,7 @@ export default class Accounts {
           .text_size(11.5)
           .child(keyHint("↵", focusedAgent() ? "switch" : "new chat"))
           .child(keyHint("↑↓", "move"))
-          .when(this.tab !== "hub", (el) => el.child(keyHint("a", "add")))
+          .when(this.tab !== "hub", (el) => el.child(keyHint("a", "add")).child(keyHint("e", "rename")))
           .child(keyHint("r", this.busy === "refresh" ? "refreshing…" : "refresh"))
           .child(div().flex_1())
           .child(keyHint("esc", "close")),

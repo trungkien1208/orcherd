@@ -9,7 +9,7 @@ import { RULES, SKILLS } from "./catalog.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
 import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate } from "./version.js";
-import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, renameAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
 
 // Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
 // is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
@@ -132,6 +132,8 @@ export default class Settings {
     this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
     this.accountInput = InputState.new({ placeholder: "name, like personal or work" });
     this.accountInput.on("submit", (_e, cx) => this.addAccount(cx));
+    this.accountNameInput = InputState.new({ placeholder: "the account's name" });
+    this.accountNameInput.on("submit", (_e, cx) => this.renameAccount(cx));
     this.stationUrlInput = InputState.new({ placeholder: "hub address, like kien-mac.local:8787" });
     this.stationUrlInput.on("submit", (_e, cx) => this.stationCheck(cx));
     this.stationAddressInput = InputState.new({ placeholder: "new hub address, e.g. mac.local:8787" });
@@ -1261,6 +1263,21 @@ export default class Settings {
     });
   }
 
+  // Rename: only the name shown changes; the account's folder and sign-in stay.
+  renameAccount(cx) {
+    const id = this.orcha.renaming;
+    if (!id) return;
+    cx.spawn(async (cx) => {
+      const failed = await renameAccount(id, this.accountNameInput.value());
+      if (failed) notify({ title: "The name was not changed", body: failed, level: "error" });
+      else {
+        this.orcha.renaming = null;
+        setShared("orcha.fuelRev", Date.now());
+      }
+      this.loadAccounts(cx);
+    });
+  }
+
   useAccount(a, cx) {
     if (this.orcha.busy[a.id]) return;
     this.orcha.busy[a.id] = true;
@@ -1322,7 +1339,19 @@ export default class Settings {
             h_flex()
               .gap(12)
               .items_center()
-              .child(v_flex().flex_1().min_w(0).child(div().text_size(14).text_color(t.foreground).child(a.label ?? a.id)).child(div().text_size(12.5).text_color(t.dim).child(a.email ?? a.limits.note ?? "")).when(Boolean(token), (el) => el.child(div().text_size(12).text_color(token.signIn ? t.blocked : t.dim).child(token.text))))
+              .child(v_flex().flex_1().min_w(0).child(this.orcha.renaming === a.id
+                ? h_flex().gap(8).items_center()
+                    .child(Input.new(this.accountNameInput).flex_1().min_w(0).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground))
+                    .child(this.button(t, `acc-name-save-${a.id}`, "Save", (_e, cx) => this.renameAccount(cx)))
+                    .child(this.button(t, `acc-name-cancel-${a.id}`, "Cancel", (_e, cx) => { this.orcha.renaming = null; cx.notify(); }))
+                : h_flex().gap(8).items_center()
+                    .child(div().text_size(14).text_color(t.foreground).child(a.label ?? a.id))
+                    .when(!isStation(a), (el) => el.child(div().id(`acc-rename-${a.id}`).px(6).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => {
+                      this.orcha.renaming = a.id;
+                      this.accountNameInput.set_value(a.label ?? a.id);
+                      this.accountNameInput.focus();
+                      cx.notify();
+                    }).child("Rename")))).child(div().text_size(12.5).text_color(t.dim).child(a.email ?? a.limits.note ?? "")).when(Boolean(token), (el) => el.child(div().text_size(12).text_color(token.signIn ? t.blocked : t.dim).child(token.text))))
               .child(control),
           )
           .when(Boolean(lent), (el) => el.child(div().text_size(12).text_color(t.muted).child(`Its chats in the main folder (~/.claude) borrow ${lent.label ?? lent.id} now, and new chats start there too. Return puts them back on ${a.label ?? a.id}, no restart.`)))

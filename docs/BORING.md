@@ -25,7 +25,7 @@ You clicked. Respect. Here's everything nobody reads.
 - 🚂 **PROCESS**: each working agent is a train between THINK, CODE, TEST and DONE. Click one to jump there.
 - ⛽ **FUEL**: what's left on the plan of the agent in front of you: Claude, Codex or Cursor.
 - 🔁 **ACCOUNTS**: add one, sign in, **SWITCH** the chat in front of you (keep running, restart, or a new pane with notes).
-- 📁 **FILES**: the project's files beside INFO, search by name or text, a viewer next to your work. Markdown reads as a page (flip to SOURCE any time).
+- 📁 **FILES**: the project's files beside INFO, search by name or text, a viewer next to your work. Right-click a file or folder: open it in the editor, its app or Finder, a new tab in a folder, copy its path. Markdown reads as a page (flip to SOURCE any time).
 - 🔎 **FIND**: `⌘O` a file, `⌘⇧F` text in the project, `⌘F` text in the pane, `⌘L` links.
 - 🔗 **Links**: right-click a link in a terminal to open or copy it, even the ones Claude shows only by name, even when they wrap.
 - 🎨 **Looks**: folder tabs in the agent's color, Brutal, Matcha and Ocean themes, light and dark.
@@ -56,6 +56,7 @@ You clicked. Respect. Here's everything nobody reads.
 - An account that sits idle keeps its last numbers ("last read Tue 09:38"); a window that reset since counts as full.
 - **Settings › Accounts** shows the default with a **Return** button while the main folder's chats borrow another account: new chats start on the borrowed one until then.
 - **Two accounts in two projects at once?** Yes: open Claude normally in one, and in the other SWITCH with **Restart** or **New pane**.
+- **Rename** an account: `e` in ACCOUNTS, or **Rename** in Settings › Accounts. Only the name shown changes; its sign-in and chats stay.
 - **ADD ACCOUNT** (`a`): name it, sign in in the pane that opens. Chats, settings and skills are shared between accounts.
 - **SIGN IN** shows when orcha can't read an account's fuel, with the reason. `r` asks every account right now.
 - **Settings › Hand-off** puts three marks on the fuel bar: ask the agent for a checklist, offer to switch, switch by itself. Kept in Orcherd's own `~/.config/orcherd/config.toml`.

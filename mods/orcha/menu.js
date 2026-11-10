@@ -1,14 +1,14 @@
-// Right-click menus in orcha's look: a project's or a pane's (Menu, opened by
-// orcha with props().target), and a terminal's (TerminalMenu, the layout's
+// Right-click menus in orcha's look: a project's, a pane's or a file's (Menu,
+// opened by orcha with props().target), and a terminal's (TerminalMenu, the layout's
 // terminal_menu: Open and Copy for the link under the pointer or selected,
 // Copy and Paste, then the pane's items, like any terminal).
 // Closing actions sit last, in red.
 
 import { div } from "gpui-kit";
-import { props, run, openOverlay, panes, terminals, notify, hc, layout, settings, shared, setShared } from "herdr";
+import { props, run, openOverlay, panes, terminals, notify, hc, layout, settings, shared, setShared, window } from "herdr";
 import { tokens, drawMenu, closePane, openWorktree } from "./ui.js";
-import { linkInSelection, openLink, placeLinks, linkAt, transcriptLinks, completeLinks } from "./links.js";
-import { projectRoot } from "./files.js";
+import { linkInSelection, openLink, placeLinks, linkAt, transcriptLinks, completeLinks, systemOpen, openInEditor } from "./links.js";
+import { projectRoot, openFile } from "./files.js";
 import { ICON_OVERLAY } from "./icon.js";
 
 // A project's or a pane's rows: [icon, label, action, danger]; closing
@@ -17,6 +17,34 @@ import { ICON_OVERLAY } from "./icon.js";
 // branch stays).
 function items(target) {
   const t = target ?? {};
+  if (t.kind === "file") {
+    // FILES (files.js): { root, rel, dir, on, query, line }. Another
+    // machine's files can only be shown in the viewer here.
+    const full = `${t.root}/${t.rel}`;
+    const platform = window()?.platform;
+    const finder = platform === "macos" ? "Finder" : platform === "windows" ? "Explorer" : "the file manager";
+    const copy = (text) => (cx) => cx.write_to_clipboard(text);
+    const view = ["file", "Open in viewer", () => openFile(t.root, t.rel, t.on, t.query ?? null, t.line ?? null)];
+    const copies = [["copy", "Copy path", copy(full)], ["copy", "Copy relative path", copy(t.rel)]];
+    if (t.on) return [...(t.dir ? [] : [view, null]), ...copies];
+    if (t.dir) {
+      return [
+        ["folder", `Open in ${finder}`, () => systemOpen(full)],
+        ["code-xml", "Open in editor", () => openInEditor(full, null, null, true)],
+        ["terminal", "New tab here", () => run("tab.new", { folder: full })],
+        null,
+        ...copies,
+      ];
+    }
+    return [
+      view,
+      ["code-xml", "Open in editor", () => openInEditor(full, t.line ?? 1)],
+      ["chevron-right", "Open with its app", () => systemOpen(full)],
+      ["folder", `Show in ${finder}`, () => systemOpen(full, true)],
+      null,
+      ...copies,
+    ];
+  }
   if (t.kind === "project") {
     return [
       ["chevron-right", "Open", () => run("space.select", { id: t.id })],
@@ -49,7 +77,7 @@ export default class Menu {
 
   render(_cx) {
     const target = props()?.target;
-    return drawMenu(tokens(), (target?.name ?? "").toUpperCase(), items(target));
+    return drawMenu(tokens(), target?.kind === "file" ? target.name ?? "" : (target?.name ?? "").toUpperCase(), items(target));
   }
 }
 

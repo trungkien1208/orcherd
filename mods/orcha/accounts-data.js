@@ -439,6 +439,32 @@ export async function addAccount(name, kind = "claude") {
   return null;
 }
 
+/** Gives a local account another name. Only the name shown changes: its id,
+ *  folder and sign-in stay, so running chats and fuel are untouched. Null,
+ *  or why it failed. */
+export async function renameAccount(id, name) {
+  const label = (name ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 40);
+  if (!label) return "Give it a name.";
+  if (id.startsWith("station-")) return "A hub account is named on the hub.";
+  const before = await readTextFile(CONFIG());
+  let config;
+  try {
+    config = JSON.parse(before);
+  } catch {
+    return "Orcherd's config.json could not be read.";
+  }
+  const account = Array.isArray(config?.accounts) ? config.accounts.find((a) => a?.id === id) : null;
+  if (!account) return "That account is not in config.json any more.";
+  if (config.accounts.some((a) => a?.id !== id && (a?.label ?? "").toLowerCase() === label.toLowerCase())) return `Another account is called ${label} already.`;
+  account.label = label;
+  try {
+    await writeTextFile(CONFIG(), `${JSON.stringify(config, null, 2)}\n`, before);
+  } catch {
+    return "config.json changed meanwhile. Try again.";
+  }
+  return null;
+}
+
 // Hand-off settings ------------------------------------------------------
 // In Orcherd's config.toml (config.js) under [orcha].
 

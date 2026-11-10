@@ -285,10 +285,13 @@ export function systemOpen(target, reveal = false) {
 }
 
 // The editor at a line (platform/macos.rs OrchaOpenTarget::File), or the
-// person's own command with {path}, $P and $L.
-function openInEditor(path, line, command) {
+// person's own command with {path}, $P and $L. `folder`: a folder, opened as
+// it is (no line).
+export function openInEditor(path, line, command, folder = false) {
   const script = command
     ? command.replace(/\{path\}/g, '"$P"')
+    : folder
+      ? 'for c in cursor code zed; do command -v "$c" >/dev/null 2>&1 && exec "$c" "$P"; done; open "$P"'
     : 'for c in cursor code; do command -v "$c" >/dev/null 2>&1 && exec "$c" -g "$P:$L"; done; command -v zed >/dev/null 2>&1 && exec zed "$P:$L"; open "$P"';
   return exec("sh", ["-c", `P="$1" L="$2"; ${script}`, "orcha", path, String(line ?? 1)]);
 }
