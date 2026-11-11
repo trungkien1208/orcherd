@@ -32,7 +32,7 @@ import {
   shellBusy,
   portPill,
 } from "./ui.js";
-import { readPaneAccounts } from "./accounts-data.js";
+import { readPaneAccounts, resumeClaude } from "./accounts-data.js";
 import { configFile } from "./paths.js";
 import { systemOpen } from "./links.js";
 import { menuHeight } from "./menu.js";
@@ -111,7 +111,7 @@ function contextOf(usageLine) {
 const HELPERS = /(^|\/)(gitstatusd|gitstatus)\b/;
 const SHELL = /^-?(\S*\/)?(zsh|bash|fish|sh)(\s|$)/;
 // How to pick a conversation up again.
-const RESUME = { claude: (id) => `claude --resume ${id}`, codex: (id) => `codex resume ${id}` };
+const RESUME = { claude: (id, folder) => resumeClaude(id, folder), codex: (id) => `codex resume ${id}` };
 // Herdr itself: the window, and herdr-core, which runs every terminal.
 const HERDR = /(Herdr\.app\/Contents\/MacOS\/Herdr|herdr-core --hc-launchd)(\s|$)/;
 const LAUNCHERS = /^(node|nodejs|python[\d.]*|ruby|bun|deno|sh|bash|zsh|env|exec|npx)$/;
@@ -287,11 +287,11 @@ export default class Left {
     if (!lost.length) return;
     const done = new Set();
     let n = 0;
-    for (const [terminal, { kind, session }] of lost) {
+    for (const [terminal, { kind, session, folder }] of lost) {
       // Two chats in one folder read as the same conversation: resume it once.
       if (!idle.has(terminal) || !RESUME[kind] || done.has(session)) continue;
       done.add(session);
-      hc(["send", terminal, RESUME[kind](session)]);
+      hc(["send", terminal, RESUME[kind](session, folder)]);
       n += 1;
     }
     if (n) notify({ title: `Resumed ${n} agent${n > 1 ? "s" : ""} after the restart`, level: "info", timeout: 4000 });
@@ -324,7 +324,9 @@ export default class Left {
             if (label) models[p.terminal] = label;
             if (tool !== undefined) stations[p.terminal] = station(tool);
             if (used) contexts[p.terminal] = used;
-            if (session) sessions[p.terminal] = { kind, session };
+            // Claude's config folder too: the chat comes back on its account.
+            const folder = kind === "claude" ? shared("orcha.agents")?.accounts?.[p.terminal]?.folder : null;
+            if (session) sessions[p.terminal] = folder && folder !== "-" ? { kind, session, folder } : { kind, session };
           }
         });
       };

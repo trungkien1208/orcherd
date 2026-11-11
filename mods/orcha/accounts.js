@@ -21,8 +21,8 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { props, closeOverlay, notify, setShared } from "herdr";
-import { readAccounts, tokenState, needsSignIn, refreshFuel, addAccount, renameAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
+import { props, closeOverlay, notify, setShared, spaces } from "herdr";
+import { readAccounts, readProjectAccounts, setProjectAccount, tokenState, needsSignIn, refreshFuel, addAccount, renameAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
 import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable, agentFacts } from "./ui.js";
 
 // The fuel left on an account by its tighter limit, or null when none was read.
@@ -38,6 +38,8 @@ export default class Accounts {
     this.placed = false; // the cursor was put on BEST (else IN USE) once the list was read
     this.home = null; // the account the chat in front is at home on, while it borrows another
     this.keep = { why: null, others: 0 };
+    this.project = spaces().find((s) => s.active) ?? null; // the project in front
+    this.projectAccount = null; // the Claude account its new chats start on (p sets it)
     this.tab = "local";
     this.tabChosen = false;
     this.busy = null;
@@ -63,8 +65,9 @@ export default class Accounts {
 
   load(cx) {
     cx.spawn(async (cx) => {
-      const { list, active } = await readAccounts();
+      const [{ list, active }, projects] = await Promise.all([readAccounts(), readProjectAccounts()]);
       this.list = list;
+      this.projectAccount = projects[this.project?.folder] ?? null;
       this.hasHub = list.some(isStation);
       // What IN USE means: the account of the agent in front of you. The
       // sidebar's last read of it shows at once; the pane's process confirms.
@@ -168,6 +171,24 @@ export default class Accounts {
         this.close();
       }
       this.load(cx);
+    });
+  }
+
+  // p: new Claude chats in the project in front start on this account. The
+  // chats running stay where they are.
+  useForProject(a, cx) {
+    if (!a || a.kind !== "claude" || !this.project?.folder || a.id === this.projectAccount) return;
+    cx.spawn(async (cx) => {
+      const failed = await setProjectAccount(this.project.folder, a.id);
+      if (failed) notify({ title: "The project's account was not saved", body: failed, level: "error" });
+      else {
+        this.projectAccount = a.id;
+        // The chat in front: at home on it now, or borrowing the one it runs on.
+        this.home = a.id === this.using ? null : a.id;
+        setShared("orcha.fuelRev", Date.now());
+        notify({ title: `${a.label ?? a.id} is ${this.project.name}'s account now`, body: "New Claude chats start on it. Chats running on another account stay there, as BORROWED: RETURN moves one back.", level: "success", timeout: 6000 });
+      }
+      cx.notify();
     });
   }
 
@@ -336,12 +357,26 @@ export default class Accounts {
               .when(this.renaming === a.id, (el) => el.child(div().flex_none().text_size(10.5).text_color(k.dim).child("↵ save · esc")))
               .when(isBest, (el) => el.child(chip(k, "BEST", k.green)))
               .when(isHome, (el) => el.child(chip(k, "HOME", k.pink)))
+              // This project's account: where its new Claude chats start.
+              .when(a.id === this.projectAccount, (el) => el.child(chip(k, "PROJECT", k.blue)))
               // HUB / LOCAL only once a hub is paired: before that, nothing new shows.
-              .when(this.hasHub && a.kind === "claude", (el) => el.child(chip(k, isStation(a) ? "HUB" : "LOCAL", isStation(a) ? k.blue : k.paper))),
+              .when(this.hasHub && a.kind === "claude", (el) => el.child(isStation(a) ? chip(k, "HUB", k.blue) : chip(k, "LOCAL", k.paper, k.muted).border(1.5).border_color(k.dim))),
           )
           .when(Boolean(a.why), (el) => el.child(div().text_size(11).text_color(readable(k, k.red)).child(`Can't start now: ${a.why}`)))
+          .when(a.kind === "claude" && Boolean(this.project?.folder) && this.renaming !== a.id, (el) =>
+            el.child(
+              a.id === this.projectAccount
+                ? (isHome ? div() : div().text_size(11).text_color(k.muted).child(`${this.project.name}'s account: its new Claude chats start here. Any other account in this project is borrowed.`))
+                : h_flex().py(2).child(
+                    button(k, `project-${a.id}`, `USE FOR ${this.project.name.toUpperCase()}${cursor ? "  P" : ""}`, (_e, cx) => {
+                      cx.stop_propagation();
+                      this.useForProject(a, cx);
+                    }, { small: true }),
+                  ),
+            ),
+          )
           .when(Boolean(a.email), (el) => el.child(div().text_size(11.5).text_color(k.dim).child(a.email)))
-          .when(isHome, (el) => el.child(div().text_size(11).text_color(k.dim).child("This chat's own account: it borrows the one in use. RETURN ends the borrow, no restart.")))
+          .when(isHome, (el) => el.child(div().text_size(11).text_color(k.dim).child(a.id === this.projectAccount ? `${this.project?.name ?? "This project"}'s account: this chat borrows the one in use. RETURN puts it back here, no restart.` : "This chat's own account: it borrows the one in use. RETURN ends the borrow, no restart.")))
           .when(Boolean(a.limits.note), (el) => el.child(div().text_size(11).text_color(k.dim).child(a.limits.note)))
           .children(gauges.length || token?.idle ? gauges : [div().text_size(11.5).text_color(a.limits.error ? readable(k, k.red) : k.dim).child(a.limits.error ?? "no fuel read yet: sign in, then refresh")])
           .when(Boolean(token), (el) => el.child(div().text_size(11).text_color(token.signIn ? readable(k, k.red) : k.dim).child(token.text)))
@@ -475,6 +510,7 @@ export default class Accounts {
     if (e.key === "r") return this.refresh(cx);
     if (!n) return;
     if (e.key === "e") return this.startRename(visible[this.at], cx);
+    if (e.key === "p") return this.useForProject(visible[this.at], cx);
     if (e.key === "down" || e.key === "j") this.at = (this.at + 1) % n;
     else if (e.key === "up" || e.key === "k") this.at = (this.at + n - 1) % n;
     else if (e.key === "enter") {
@@ -563,6 +599,7 @@ export default class Accounts {
           .child(keyHint("↵", focusedAgent() ? "switch" : "new chat"))
           .child(keyHint("↑↓", "move"))
           .when(this.tab !== "hub", (el) => el.child(keyHint("a", "add")).child(keyHint("e", "rename")))
+          .when(Boolean(this.project?.folder), (el) => el.child(keyHint("p", "project's")))
           .child(keyHint("r", this.busy === "refresh" ? "refreshing…" : "refresh"))
           .child(div().flex_1())
           .child(keyHint("esc", "close")),

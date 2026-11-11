@@ -47,6 +47,7 @@ You clicked. Respect. Here's everything nobody reads.
 
 ## Accounts, switching and hand-off
 
+- **A project has its Claude account** (once you have more than one): the first Claude you start in a project from **+ NEW** asks which account, and later ones start there. **Claude account…** (`A` in NEW, or the project's right-click menu) changes it for new chats. That account is the project's own: a chat there running on any other account is BORROWED (FUEL says so), and **RETURN** in ACCOUNTS moves it back. ACCOUNTS marks it **PROJECT**; **USE FOR …** (`p`) on another account makes that one the project's. After a crash, a chat is resumed on its own account.
 - **SWITCH** moves the chat in front of you to an account. Claude to Claude asks how, unless Settings › Hand-off already says:
   - **Keep running**: same chat, no restart; Claude picks up the new sign-in within half a minute. Every chat started in the same folder moves with it. The chat borrows the account: FUEL says BORROWED, and in ACCOUNTS its own account says HOME, where **RETURN** ends the borrow.
   - **Restart**: same chat, Claude starts again on the account. Only this pane moves.

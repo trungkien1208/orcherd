@@ -164,13 +164,13 @@ export default class Panel {
       }
       // Borrowing: the account whose tokens are spent (its fuel below), a
       // BORROWED chip, and one line saying whose chat it is.
-      const owner = known?.borrowed ? accounts.find((a) => a.id === known.seat) : null;
+      const owner = known?.borrowed ? (await readAccounts()).list.find((a) => a.id === known.seat) ?? null : null;
       const short = (a) => (a.label ?? a.id).split("·").pop().trim();
       this.fuel = {
         label: account.label ?? account.id,
         email: owner ? null : account.email ?? null,
         chip: owner ? "🤝 BORROWED" : null,
-        sub: owner ? `${short(owner)}'s chat, running on ${short(account)}'s tokens · click, then RETURN ends it` : null,
+        sub: owner ? `${known.project ? `${known.project}'s account is ${short(owner)}` : `${short(owner)}'s chat`}, running on ${short(account)}'s tokens · click, then RETURN ends it` : null,
         limits,
       };
       cx.notify();

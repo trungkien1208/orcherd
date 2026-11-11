@@ -6,7 +6,7 @@
 // Fuel, signing in and switching go through bin/accounts.py, which ships
 // with this mod: the Keychain and the account folders stay in one place.
 
-import { readTextFile, writeTextFile, exec, hc, home, run, focused, agents, panes } from "herdr";
+import { readTextFile, writeTextFile, exec, hc, home, run, focused, agents, panes, spaces } from "herdr";
 import { agentTitle, expandHome } from "./ui.js";
 import { readTable, writeKey } from "./config.js";
 import { configFile, cacheFile, script, makeConfigDir } from "./paths.js";
@@ -289,18 +289,25 @@ export async function readPaneAccounts() {
   if (!claudes.length) return {};
   const folders = await configFolders(claudes.map((p) => p.terminal));
   const unique = [...new Set(folders)];
-  const [holders, { list, main }] = await Promise.all([holdersOf(unique), readAccounts()]);
+  const [holders, { list, main }, projects] = await Promise.all([holdersOf(unique), readAccounts(), readProjectAccounts()]);
   const holderOf = new Map(unique.map((f, i) => [f, holders[i]]));
+  // Each pane's project: the space its tab is in.
+  const projectOf = new Map();
+  for (const s of spaces()) for (const t of s.tabs ?? []) projectOf.set(t.id, s);
   const out = {};
   claudes.forEach((p, i) => {
     const folder = folders[i];
     const id = holderOf.get(folder);
     if (!id) return;
-    // Whose the folder is: the default account's for the main one.
-    const owner = folder === "-" ? list.find((a) => a.id === main) ?? null : list.find((a) => a.kind === "claude" && claudeDir(a) === folder) ?? null;
+    // The chat's home: its project's account when the project has one (any
+    // other account in that project is borrowed, however the chat got on
+    // it); else whose the config folder is, the default's for the main one.
+    const project = projectOf.get(p.tab) ?? null;
+    const mine = list.find((a) => a.kind === "claude" && a.id === projects[project?.folder]) ?? null;
+    const owner = mine ?? (folder === "-" ? list.find((a) => a.id === main) ?? null : list.find((a) => a.kind === "claude" && claudeDir(a) === folder) ?? null);
     const label = list.find((a) => a.id === id)?.label ?? id;
     const borrowed = Boolean(owner && owner.id !== id);
-    out[p.terminal] = { id, label, other: id !== main, borrowed, seat: borrowed ? owner.id : null };
+    out[p.terminal] = { id, label, other: id !== main, borrowed, seat: borrowed ? owner.id : null, folder, project: mine ? project.name : null };
   });
   return out;
 }
@@ -343,25 +350,72 @@ export async function keepRunningOn(account, from) {
   return r.code === 0 ? null : lastLine(r, "accounts.py failed");
 }
 
-/** A new chat on `account`, in a new tab: Claude in the account's own folder,
- *  Codex and Cursor as they are. Null, or why not. */
-export async function startOn(account) {
+// Project accounts -------------------------------------------------------
+// The Claude account a project's new chats start on (NEW asks once, the
+// project's right-click menu changes it): { project folder: account id } in
+// project-accounts.json. A chat started there is at home on that account;
+// kept running on another one, it borrows.
+
+const PROJECT_ACCOUNTS = () => configFile("project-accounts.json");
+
+/** { project folder: account id }. */
+export async function readProjectAccounts() {
+  const map = await readJson(PROJECT_ACCOUNTS());
+  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+}
+
+/** New Claude chats in `folder` start on account `id`. Null, or why not. */
+export async function setProjectAccount(folder, id) {
+  if (!folder) return "This project has no folder.";
+  await makeConfigDir();
+  const before = await readTextFile(PROJECT_ACCOUNTS());
+  let map = {};
+  try {
+    map = before ? JSON.parse(before) : {};
+  } catch {
+    // a file that can't be read starts again: it only holds these choices
+  }
+  if (!map || typeof map !== "object" || Array.isArray(map)) map = {};
+  map[folder] = id;
+  try {
+    await writeTextFile(PROJECT_ACCOUNTS(), `${JSON.stringify(map, null, 2)}\n`, before);
+  } catch {
+    return "The project's account was not saved. Try again.";
+  }
+  return null;
+}
+
+/** What a shell runs to pick conversation `session` up again in config
+ *  folder `folder` ("-" or none: the main one), so a chat resumed after a
+ *  crash stays on its account. */
+export function resumeClaude(session, folder) {
+  const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+  if (!folder || folder === "-") return `claude --resume ${session}`;
+  if (folder.startsWith(STATION_DIR())) return `python3 -I ${q(STATION())} run ${stationIdOf(folder)} --resume ${session}`;
+  return `env CLAUDE_CONFIG_DIR=${q(folder)} claude --resume ${session}`;
+}
+
+/** A new chat on `account`, in a new tab (of `space`, named `name`, when
+ *  given): Claude in the account's own folder, Codex and Cursor as they are.
+ *  Null, or why not. */
+export async function startOn(account, { space, name } = {}) {
+  const tab = (argv) => run("tab.new", { argv, ...(space ? { space } : {}), ...(name ? { name } : {}) });
   if (isStation(account)) {
     if (account.why) return `${account.label}: ${account.why}.`;
-    run("tab.new", { argv: ["python3", "-I", STATION(), "run", account.stationId] });
+    tab(["python3", "-I", STATION(), "run", account.stationId]);
     return null;
   }
   if (account.kind !== "claude") {
     const argv = AGENT_RUN[account.kind];
     if (!argv) return `orcha can't start ${account.kind}.`;
-    run("tab.new", { argv: [argv] });
+    tab([argv]);
     return null;
   }
   const dir = claudeDir(account);
   const why = await folderTaken(account);
   if (why) return why;
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
-  run("tab.new", { argv: dir ? ["env", `CLAUDE_CONFIG_DIR=${dir}`, "claude"] : ["claude"] });
+  tab(dir ? ["env", `CLAUDE_CONFIG_DIR=${dir}`, "claude"] : ["claude"]);
   return null;
 }
 

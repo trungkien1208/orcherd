@@ -35,9 +35,12 @@ export async function readRepo(key) {
   const on = key.slice(0, at) || null;
   const cwd = key.slice(at + 1);
   try {
-    const r = await exec("git", ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], { cwd, on });
-    const [top, common] = r.code === 0 ? r.stdout.trim().split("\n") : [];
+    const r = await exec("git", ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--show-prefix"], { cwd, on });
+    const [top, common, prefix] = r.code === 0 ? r.stdout.split("\n") : [];
     if (!top || !common) return null;
+    // A folder inside a checkout (a project kept in a bigger repo's folder, a
+    // package of a monorepo) is a project of its own, not a worktree of it.
+    if (prefix) return { repo: `${on ?? ""}\n${common}\n${prefix}`, main: cwd, top: cwd, linked: false };
     // A submodule's git folder sits in its parent's: its own repo, not a worktree.
     const sub = common.includes("/.git/modules/");
     const main = sub ? top : common.endsWith("/.git") ? common.slice(0, -5) : common;

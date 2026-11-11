@@ -10,6 +10,7 @@ import { tokens, drawMenu, closePane, openWorktree } from "./ui.js";
 import { linkInSelection, openLink, placeLinks, linkAt, transcriptLinks, completeLinks, systemOpen, openInEditor } from "./links.js";
 import { projectRoot, openFile } from "./files.js";
 import { ICON_OVERLAY } from "./icon.js";
+import { openProjectAccount } from "./new.js";
 
 // A project's or a pane's rows: [icon, label, action, danger]; closing
 // actions sit last, after a line. A worktree (left.js: `linked`) can be
@@ -51,6 +52,7 @@ function items(target) {
       ["plus", "New tab", () => run("tab.new", { space: t.id })],
       ["settings", "Rename…", () => run("space.rename", { id: t.id })],
       ["zap", "Set icon…", () => openOverlay({ mod: "orcha", props: { part: "icon", target: t }, ...ICON_OVERLAY })],
+      ["user-round", "Claude account…", () => openProjectAccount(t.id)],
       null,
       ...(t.linked ? [["git-branch", "Remove worktree…", () => openWorktree(t.id, "remove"), true]] : []),
       ["x", "Close project", () => run("space.close", { id: t.id }), true],
