@@ -478,10 +478,20 @@ def cmd_adopt(src, dst, cwd, every=False, if_newer=False):
     make_dir(os.path.join(b, slug))
     for chat in sorted(chats, key=os.path.getmtime) if every else [newest]:
         link = os.path.join(b, slug, os.path.basename(chat))
+        # A hard link: Claude Code (2.1.322) skips a chat that is a symlink,
+        # so --continue opened a new one. One file, two names: Claude appends
+        # to it through either. An older adopt's symlink is swapped for one.
+        if os.path.islink(link):
+            os.unlink(link)
         if not os.path.lexists(link):
-            os.symlink(os.path.realpath(chat), link)
-    own = [os.path.join(b, slug, f) for f in os.listdir(os.path.join(b, slug))
-           if f.endswith(".jsonl") and not os.path.islink(os.path.join(b, slug, f))]
+            try:
+                os.link(os.path.realpath(chat), link)
+            except OSError:  # another volume: no hard link, the old way
+                os.symlink(os.path.realpath(chat), link)
+    # The folder's own chats: not the same file as one of src's.
+    theirs = {os.stat(c).st_ino for c in chats}
+    own = [p for p in (os.path.join(b, slug, f) for f in os.listdir(os.path.join(b, slug)) if f.endswith(".jsonl"))
+           if not os.path.islink(p) and os.stat(p).st_ino not in theirs]
     if not if_newer or not own or os.path.getmtime(newest) >= max(os.path.getmtime(f) for f in own):
         os.utime(os.path.join(b, slug, os.path.basename(newest)), follow_symlinks=True)
 
