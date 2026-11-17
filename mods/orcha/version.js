@@ -8,7 +8,7 @@ import { exec, shared, setShared, notify, readTextFile, appHome } from "herdr";
 import { script } from "./paths.js";
 
 /** Bumped at every release, before the tag. */
-export const VERSION = "0.8.3";
+export const VERSION = "0.9.0";
 export const REPO = "trungkien1208/orcherd";
 const EVERY = 6 * 60 * 60 * 1000;
 
