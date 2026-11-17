@@ -230,24 +230,20 @@ export function openKeychainAccess() {
 // accounts.py doctor / diagnose / log. Settings › Accounts shows the checks
 // and the setup steps; the report goes to an agent or the clipboard.
 
-const PYTHON_MISSING = [{
-  id: "python",
-  ok: false,
-  title: "python3 is missing",
-  detail: "Orcherd switches accounts with python3, which comes with Apple's Command Line Tools. Install them (xcode-select --install), then press Check again.",
-  fix: "install-python",
-}];
+const problem = (id, icon, short, detail, fix = null) => ({ checks: [{ id, ok: false, icon, short, title: short, detail, fix, account: null }], accounts: null, signed: null });
 
-/** [{ id, ok: true | false | null, title, detail, fix }]: what moving chats
- *  between Claude accounts needs on this Mac. Up to a minute: macOS may be
- *  showing a Keychain dialog that waits for the user. */
+/** { checks: [{ id, ok: true | false | null, icon, short, title, detail, fix,
+ *  account }], accounts, signed }: what moving chats between Claude accounts
+ *  needs on this Mac, and how many Claude accounts are here and signed in.
+ *  Up to a minute: macOS may be showing a Keychain dialog that waits. */
 export async function readDoctor() {
   const r = await exec("python3", ["-I", LIMITS(), "doctor"], { timeout: 60000 }).catch(() => null);
-  if (!r || /xcode-select|command line developer tools|No developer tools/i.test(`${r.stderr}`)) return PYTHON_MISSING;
+  if (!r || /xcode-select|command line developer tools|No developer tools/i.test(`${r.stderr}`))
+    return problem("python", "🐍", "python3 is missing", "Orcherd switches accounts with python3, which comes with Apple's Command Line Tools (xcode-select --install).", "install-python");
   try {
     if (r.code === 0) return JSON.parse(r.stdout);
   } catch {}
-  return [{ id: "doctor", ok: false, title: "The checks could not run", detail: lastLine(r, "accounts.py failed"), fix: null }];
+  return problem("doctor", "⚠️", "The checks could not run", `${lastLine(r, "accounts.py failed")}. Fix with Claude reads a report of this Mac and finds out why.`, "diagnose");
 }
 
 /** Apple's Command Line Tools installer (python3 comes with it). */

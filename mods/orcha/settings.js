@@ -9,7 +9,7 @@ import { RULES, SKILLS } from "./catalog.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
 import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate, restartNeeded, restartHerdr } from "./version.js";
-import { readAccounts, tokenState, needsSignIn, makeDefault, notifyError, logFailure, readDoctor, installPython, installClaude, writeDiagnostics, copyDiagnostics, revealDiagnostics, fixWithAgent, moveToKeychain, unlockKeychain, openKeychainAccess, refreshFuel, addAccount, renameAccount, removeAccount, sameClaude, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
+import { readAccounts, tokenState, needsSignIn, makeDefault, notifyError, logFailure, readDoctor, installPython, installClaude, writeDiagnostics, copyDiagnostics, fixWithAgent, moveToKeychain, unlockKeychain, openKeychainAccess, refreshFuel, addAccount, renameAccount, removeAccount, sameClaude, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
 
 // Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
 // is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
@@ -1342,112 +1342,14 @@ export default class Settings {
     });
   }
 
-  doctorFix(t, c, cx) {
-    const go = (label, work) => this.button(t, `doctor-fix-${c.id}`, label, work);
-    switch (c.fix) {
-      case "install-python":
-        return go("Install tools", () => installPython());
-      case "install-claude":
-        return go("Install Claude Code", () => installClaude());
-      case "unlock":
-        return go("Unlock", () => unlockKeychain());
-      case "keychain-access":
-        return go("Keychain Access", () => openKeychainAccess());
-      case "move":
-        return go("Move to Keychain", (_e, cx) =>
-          cx.spawn(async (cx) => {
-            const failed = await moveToKeychain();
-            if (failed) notifyError({ title: "The sign-in stayed in the file", body: failed, level: "error" });
-            this.loadDoctor(cx);
-          }),
-        );
-      default:
-        return null;
-    }
+  toggleHelp(id, cx) {
+    this.orcha.doctorHelp = this.orcha.doctorHelp === id ? null : id;
+    cx.notify();
   }
 
-  readiness(t, cx) {
-    const checks = this.orcha.doctor;
-    if (!checks && !this.orcha.doctorBusy) this.loadDoctor(cx);
-    const bad = (checks ?? []).filter((c) => c.ok === false).length;
-    const mark = (ok) => (ok === true ? "✅" : ok === false ? "❌" : "⚠️");
-    const open = this.orcha.guideOpen ?? Boolean(bad);
-    const status = !checks ? (this.orcha.doctorBusy ? "checking…" : "") : bad ? `${bad} to fix` : "ready ✓";
-    const box = v_flex()
-      .w_full()
-      .gap(6)
-      .py(12)
-      .border_b(1)
-      .border_color(t.border)
-      .child(
-        h_flex()
-          .gap(10)
-          .items_center()
-          .child(div().flex_1().text_size(14).text_color(t.foreground).child("Switching accounts on this Mac"))
-          .child(div().text_size(12.5).text_color(bad ? t.blocked : t.dim).child(status))
-          .child(this.orcha.doctorBusy ? div().text_size(12.5).text_color(t.dim).child("…") : this.button(t, "doctor-again", "Check again", (_e, cx) => {
-            this.loadDoctor(cx);
-            cx.notify();
-          })),
-      )
-      .child(div().text_size(12.5).text_color(t.dim).child("Moving a chat to another Claude account writes its sign-in into the macOS Keychain. Each line says what is missing and how to fix it."));
-    for (const c of checks ?? []) {
-      const fix = c.ok === false ? this.doctorFix(t, c, cx) : null;
-      box.child(
-        h_flex()
-          .w_full()
-          .gap(10)
-          .py(4)
-          .items_start()
-          .child(div().w(20).flex_none().text_size(13).child(mark(c.ok)))
-          .child(
-            v_flex()
-              .flex_1()
-              .min_w(0)
-              .gap(2)
-              .child(div().text_size(13).text_color(c.ok === false ? t.foreground : t.muted).child(c.title))
-              .when(Boolean(c.detail) && c.ok !== true, (el) => el.child(div().text_size(12).text_color(t.dim).child(c.detail))),
-          )
-          .when(Boolean(fix), (el) => el.child(fix)),
-      );
-    }
-    const steps = [
-      "Add each Claude account below: give it a name, then Add and sign in. A browser opens: pick that claude.ai account. If it signs in the wrong one, sign out of claude.ai first or open the link in a private window.",
-      "Each account gets a folder of its own; your chats, settings and skills are shared between them.",
-      "Make default: the account new chats start on.",
-      "Move a chat: click FUEL or 👤 in the header, then SWITCH on an account: KEEP RUNNING (no restart), RESTART (only this chat) or NEW PANE.",
-      "If macOS asks for the Keychain: type your Mac's password and click Always Allow, not Allow.",
-      "Settings › Hand-off moves chats before an account runs dry.",
-    ];
-    return box
-      .child(
-        div()
-          .id("doctor-guide")
-          .pt(4)
-          .text_size(12.5)
-          .text_color(t.accent)
-          .cursor_pointer()
-          .on_click((_e, cx) => {
-            this.orcha.guideOpen = !open;
-            cx.notify();
-          })
-          .child(open ? "▾ How to set up several accounts" : "▸ How to set up several accounts"),
-      )
-      .when(open, (el) =>
-        el.child(
-          v_flex()
-            .gap(4)
-            .pl(4)
-            .children(steps.map((s, i) => h_flex().gap(8).items_start().child(div().w(16).flex_none().text_size(12.5).text_color(t.dim).child(`${i + 1}.`)).child(div().flex_1().min_w(0).text_size(12.5).text_color(t.muted).child(s)))),
-        ),
-      );
-  }
-
-  // Something wrong: a report (accounts.py diagnose) for an AI agent to read
-  // and fix with you: in a new Claude tab, or on the clipboard for any chat.
-  diagnostics(t) {
-    const busy = this.orcha.busy.diagnose;
-    const make = (then) => (_e, cx) => {
+  // A click handler: writes the diagnostics report, then `then(path)`.
+  withReport(then) {
+    return (_e, cx) => {
       if (this.orcha.busy.diagnose) return;
       this.orcha.busy.diagnose = true;
       cx.notify();
@@ -1459,28 +1361,154 @@ export default class Settings {
         cx.notify();
       });
     };
+  }
+
+  // Under an open check: the whole story, and what to press once it's done.
+  doctorSteps(t, c) {
     return v_flex()
-      .w_full()
       .gap(6)
-      .py(12)
-      .border_b(1)
-      .border_color(t.border)
-      .child(div().text_size(14).text_color(t.foreground).child("Something not working?"))
-      .child(div().text_size(12.5).text_color(t.dim).child("Writes a report with the versions, the checks above, your accounts (emails masked, no tokens) and the recent errors, for an AI agent to find the cause and fix it with you."))
+      .pl(50)
+      .pb(4)
+      .child(div().text_size(12).text_color(t.muted).child(c.detail))
       .child(
         h_flex()
           .gap(8)
-          .pt(4)
-          .child(busy ? div().text_size(12.5).text_color(t.dim).child("writing the report…") : this.button(t, "diag-fix", "Fix with Claude", make((path) => fixWithAgent(path))))
-          .when(!busy, (el) =>
-            el
-              .child(this.button(t, "diag-copy", "Copy report", make(async (path) => {
-                await copyDiagnostics(path);
-                notify({ title: "The report is on the clipboard", body: "Paste it into any AI chat and ask it to fix Orcherd.", level: "success", timeout: 5000 });
-              })))
-              .child(this.button(t, "diag-show", "Show in Finder", make((path) => revealDiagnostics(path)))),
-          ),
+          .when(c.fix === "keychain-access", (el) => el.child(this.button(t, `doctor-kc-${c.id}`, "Open Keychain Access", () => openKeychainAccess())))
+          .child(this.button(t, `doctor-done-${c.id}`, "Done, check again", (_e, cx) => {
+            this.orcha.doctorHelp = null;
+            this.loadDoctor(cx);
+            cx.notify();
+          })),
       );
+  }
+
+  // The button that fixes check `c`, or null. Sign in and remove act on its account.
+  doctorFix(t, c) {
+    const go = (label, work) => this.button(t, `doctor-fix-${c.id}`, label, work);
+    switch (c.fix) {
+      case "install-python":
+        return go("Install", () => installPython());
+      case "install-claude":
+        return go("Install", () => installClaude());
+      case "unlock":
+        return go("Unlock", () => unlockKeychain());
+      case "keychain-access":
+        return go(this.orcha.doctorHelp === c.id ? "Hide" : "How to fix", (_e, cx) => this.toggleHelp(c.id, cx));
+      case "diagnose":
+        return go("Fix with Claude", this.withReport((path) => fixWithAgent(path)));
+      case "sign-in":
+        return go("Sign in", () => {
+          closeOverlay(props()?.overlay);
+          signIn(c.account);
+        });
+      case "remove":
+        return go("Remove", (_e, cx) => {
+          this.orcha.removing = c.account;
+          cx.notify();
+        });
+      case "ask":
+        return go(this.orcha.doctorHelp === c.id ? "Hide" : "What to click", (_e, cx) => this.toggleHelp(c.id, cx));
+      case "move":
+        return go("Move it in", (_e, cx) =>
+          cx.spawn(async (cx) => {
+            const failed = await moveToKeychain();
+            if (failed) notifyError({ title: "The sign-in stayed in the file", body: failed, level: "error" });
+            this.loadDoctor(cx);
+            cx.notify();
+          }),
+        );
+      default:
+        return null;
+    }
+  }
+
+  // Quiet when switching works (one line), loud only about what blocks it:
+  // a line and a button each, the whole story in a tooltip. Under two Claude
+  // accounts, the setup steps instead, ticked from what is really there.
+  readiness(t, cx) {
+    const d = this.orcha.doctor;
+    if (!d && !this.orcha.doctorBusy) this.loadDoctor(cx);
+    const again = this.orcha.doctorBusy
+      ? div().text_size(12.5).text_color(t.dim).child("checking…")
+      : div().id("doctor-again").px(6).rounded(5).text_size(13).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Check again").on_click((_e, cx) => {
+          this.loadDoctor(cx);
+          cx.notify();
+        }).child("↻");
+    const head = (icon, text, color) => h_flex().gap(8).items_center().child(div().text_size(13).child(icon)).child(div().flex_1().min_w(0).text_size(13.5).text_color(color).child(text)).child(again);
+    const box = v_flex().w_full().gap(6).py(12).border_b(1).border_color(t.border);
+    if (!d) return box.child(head("⏳", "Checking what switching accounts needs…", t.dim));
+    const bad = d.checks.filter((c) => c.ok === false);
+    const steps = d.accounts != null && d.accounts < 2 ? this.setupSteps(t, d) : null;
+    if (!bad.length) {
+      return box.child(steps ? head("👥", "Switching needs a second Claude account", t.foreground) : head("✅", `Ready to switch · ${d.accounts} Claude accounts`, t.muted)).when(Boolean(steps), (el) => el.child(steps));
+    }
+    box.child(head("⚠️", bad.length === 1 ? "1 thing blocks switching" : `${bad.length} things block switching`, t.blocked));
+    for (const c of bad) {
+      const fix = this.doctorFix(t, c);
+      box.child(
+        h_flex()
+          .id(`doctor-${c.id}`)
+          .w_full()
+          .gap(8)
+          .pl(22)
+          .items_center()
+          .when(Boolean(c.detail), (el) => el.tooltip(c.detail))
+          .child(div().w(20).flex_none().text_size(13).child(c.icon ?? "❌"))
+          .child(div().flex_1().min_w(0).text_size(13).text_color(t.foreground).child(c.short ?? c.title))
+          // ? opens the whole story here too: a tooltip alone is easy to miss
+          .when(Boolean(c.detail) && c.fix !== "ask" && c.fix !== "keychain-access", (el) =>
+            el.child(div().id(`doctor-why-${c.id}`).px(6).rounded(5).text_size(12.5).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Why, and how to fix it").on_click((_e, cx) => this.toggleHelp(c.id, cx)).child("?")))
+          .when(Boolean(fix), (el) => el.child(fix)),
+      );
+      if (this.orcha.doctorHelp === c.id && c.detail) box.child(this.doctorSteps(t, c));
+    }
+    return box.when(Boolean(steps), (el) => el.child(steps));
+  }
+
+  // Add → Sign in → Add a second → Switch, ticked from the accounts here.
+  setupSteps(t, d) {
+    const done = [d.accounts >= 1, d.accounts >= 1 && d.signed >= d.accounts, d.accounts >= 2, false];
+    const names = ["Add", "Sign in", "Add a 2nd", "Switch"];
+    const row = h_flex().gap(6).pl(22).items_center().flex_wrap();
+    names.forEach((n, i) => {
+      if (i) row.child(div().text_size(12).text_color(t.dim).child("──"));
+      row.child(div().text_size(12.5).text_color(done[i] ? t.muted : t.foreground).child(`${done[i] ? "✓" : "○"} ${n}`));
+    });
+    return v_flex()
+      .gap(6)
+      .child(row)
+      .child(
+        h_flex().pl(22).gap(8).items_center()
+          .child(this.button(t, "doctor-add", "Add account", (_e, cx) => {
+            this.orcha.addKind = "claude";
+            this.accountInput.focus();
+            cx.notify();
+          }))
+          .child(div().text_size(12).text_color(t.dim).child("Then move a chat from FUEL or 👤 › SWITCH.")),
+      );
+  }
+
+  // Something wrong: a report (accounts.py diagnose) for an AI agent to read
+  // and fix with you, in a new Claude tab or on the clipboard for any chat.
+  diagnostics(t) {
+    const busy = this.orcha.busy.diagnose;
+    const make = (then) => this.withReport(then);
+    const link = (id, label, tip, onClick) => div().id(id).text_size(12.5).text_color(t.accent).cursor_pointer().hover((s) => s.underline()).tooltip(tip).on_click(onClick).child(label);
+    return h_flex()
+      .w_full()
+      .gap(8)
+      .py(10)
+      .items_center()
+      .child(div().text_size(12.5).text_color(t.dim).child("Something wrong?"))
+      .child(busy
+        ? div().text_size(12.5).text_color(t.dim).child("writing the report…")
+        : h_flex().gap(8).items_center()
+          .child(link("diag-fix", "Fix with Claude", "A new Claude tab reads a report of this Mac (versions, checks, accounts with emails masked, recent errors; no tokens) and fixes it with you.", make((path) => fixWithAgent(path))))
+          .child(div().text_size(12.5).text_color(t.dim).child("·"))
+          .child(link("diag-copy", "Copy report", "The same report on the clipboard, for any AI chat.", make(async (path) => {
+            await copyDiagnostics(path);
+            notify({ title: "The report is on the clipboard", body: "Paste it into any AI chat and ask it to fix Orcherd.", level: "success", timeout: 5000 });
+          }))));
   }
 
   accounts(t, cx) {

@@ -1383,37 +1383,43 @@ def keychain_access(service):
 
 
 def doctor_checks():
-    """[{id, ok, title, detail, fix}]: ok True (fine), False (switching fails
-    until fixed) or None (works, but worth knowing). fix: what the app offers
-    (unlock, keychain-access, move, sign-in, add, install-claude), or None."""
+    """[{id, ok, icon, short, title, detail, fix, account}]: ok True (fine),
+    False (switching fails until fixed) or None (works, worth knowing).
+    short: the few words Settings shows; title and detail: the whole story
+    (a tooltip there, the diagnostics report). fix: what the app's button
+    does (install-claude, unlock, keychain-access, move, ask, sign-in,
+    remove, add), on `account` for sign-in and remove."""
     out = []
 
-    def check(id_, ok, title, detail="", fix=None):
-        out.append({"id": id_, "ok": ok, "title": title, "detail": detail, "fix": fix})
+    def check(id_, ok, icon, short, title, detail="", fix=None, account=None):
+        out.append({"id": id_, "ok": ok, "icon": icon, "short": short, "title": title,
+                    "detail": detail, "fix": fix, "account": account})
 
     claude = agent_path("claude")
-    check("claude-cli", bool(claude),
-          "Claude Code is installed" if claude else "Claude Code is not installed",
-          claude or "Install it: curl -fsSL https://claude.ai/install.sh | bash, then press Check again.",
-          None if claude else "install-claude")
+    if claude:
+        check("claude-cli", True, "🧰", "Claude Code installed", "Claude Code is installed", claude)
+    else:
+        check("claude-cli", False, "🧰", "Claude Code isn't installed", "Claude Code is not installed",
+              "Install it: curl -fsSL https://claude.ai/install.sh | bash, then check again.", "install-claude")
 
     kc = keychain_state()
     state = kc["state"]
     if state == "ok":
-        check("keychain", True, "The macOS Keychain can be written",
+        check("keychain", True, "🔐", "Keychain writable", "The macOS Keychain can be written",
               "Switching writes the sign-in there.")
     elif state == "file-only":
         n = len(kc["files"])
-        check("keychain", False, "Claude keeps a sign-in in a file, not the Keychain",
+        check("keychain", False, "🗂️", "Sign-in stuck in a file", "Claude keeps a sign-in in a file, not the Keychain",
               f"{n} .credentials.json file{'s' if n != 1 else ''}: a running chat would not see a switch. "
-              "Move to Keychain puts them in and deletes the files.", "move")
+              "Move it in puts them in the Keychain and deletes the files.", "move")
     elif state == "locked":
-        check("keychain", False, "The macOS Keychain is locked",
+        check("keychain", False, "🔒", "Keychain is locked", "The macOS Keychain is locked",
               f"{kc['why'] or ''}. Unlock it with your Mac's password.".lstrip(". "), "unlock")
     else:
-        check("keychain", False, "The macOS Keychain can't be written",
-              f"{kc['why'] or 'security failed'}. Usually the Mac's password changed and the login keychain "
-              "kept the old one: Keychain Access › Settings › Reset Default Keychain, then sign in again.",
+        check("keychain", False, "🔐", "Keychain can't be written", "The macOS Keychain can't be written",
+              f"Usually the Mac's password changed and the login keychain kept the old one ({kc['why'] or 'security failed'}). "
+              "1. Open Keychain Access. 2. Its menu Keychain Access › Settings › Reset Default Keychain "
+              "(it asks your Mac's password). 3. Back here, Sign in each account again.",
               "keychain-access")
 
     # Items Claude made: macOS may ask before `security` reads them.
@@ -1430,47 +1436,54 @@ def doctor_checks():
             if got == "denied":
                 denied.append(f"{svc} ({why})")
     if asking:
-        check("keychain-access", False, "macOS is asking before Orcherd may read a sign-in",
-              f"A dialog asks for \"{asking[0]}\". Type your Mac's password and click Always Allow "
-              "(not Allow: that asks again at every switch), then press Check again.")
+        check("keychain-access", False, "🛡️", "macOS is asking for permission",
+              "macOS is asking before Orcherd may read a sign-in",
+              f"A macOS dialog asks about \"{asking[0]}\" (it may be behind this window). Type your Mac's "
+              "password and click Always Allow, not Allow: Allow asks again at every switch.", "ask")
     elif denied:
-        check("keychain-access", False, "macOS refuses Orcherd a sign-in in the Keychain",
-              f"{'; '.join(denied)}. In Keychain Access find that item › Access Control, allow "
-              "/usr/bin/security (or delete the item and sign that account in again).", "keychain-access")
+        check("keychain-access", False, "🛡️", "macOS refuses a sign-in",
+              "macOS refuses Orcherd a sign-in in the Keychain",
+              f"{'; '.join(denied)}. 1. Open Keychain Access and search that name. 2. Double-click it › "
+              "Access Control › + › ⌘⇧G, type /usr/bin/security › Add › Save Changes. "
+              "Or delete that item, then Sign in its account again here.", "keychain-access")
     elif state in ("ok", "file-only"):
-        check("keychain-access", True, "Orcherd may read Claude's sign-ins without asking")
+        check("keychain-access", True, "🛡️", "Sign-ins readable", "Orcherd may read Claude's sign-ins without asking")
 
     locals_ = claude_accounts()
     if len(locals_) < 2:
-        check("accounts", None, "Only one Claude account here",
-              "Add a second one below to move chats between them when one runs dry.", "add")
+        check("accounts", None, "👥", "Only one Claude account" if locals_ else "No Claude account yet",
+              "Fewer than two Claude accounts here",
+              "Add a second one to move chats between them when one runs dry.", "add")
     else:
-        check("accounts", True, f"{len(locals_)} Claude accounts here")
+        check("accounts", True, "👥", f"{len(locals_)} Claude accounts", f"{len(locals_)} Claude accounts here")
 
-    missing = []
     for a in locals_:
         with contextlib.suppress(Exception):
             if not freshest(a)[1] and not cred_file_read(own_service(ACCOUNTS[a])):
-                missing.append(label_of(a))
-    if missing:
-        check("signed-in", False, f"Not signed in: {', '.join(missing)}",
-              "SIGN IN on each of them (here or in ACCOUNTS). A browser opens: pick the right claude.ai account.",
-              "sign-in")
-    elif locals_:
-        check("signed-in", True, "Every Claude account is signed in")
+                check(f"signed-in-{a}", False, "🔑", f"{label_of(a)} isn't signed in", f"{label_of(a)} is not signed in",
+                      "A browser opens: pick that claude.ai account. If it signs in the wrong one, sign out of "
+                      "claude.ai first or open the link in a private window.", "sign-in", a)
 
-    seen, twins = {}, []
+    seen = {}
     for a in locals_:
         e = str(email(a) or ACCOUNTS[a].get("email") or "").strip().lower()
         if e and e in seen:
-            twins.append(f"{seen[e]} and {label_of(a)}")
+            check(f"twins-{a}", False, "👯", f"{label_of(a)} = {label_of(seen[e])} (same email)",
+                  f"{label_of(a)} and {label_of(seen[e])} are one Claude account",
+                  "Both signed in as the same email: one fuel. Remove one, sign out of claude.ai in the "
+                  "browser (or use a private window), then add it again.", "remove", a)
         elif e:
-            seen[e] = label_of(a)
-    if twins:
-        check("twins", False, "Two names for one Claude account",
-              f"{'; '.join(twins)} signed in as the same email: one fuel. Remove one, sign out of claude.ai "
-              "in the browser (or use a private window), then add it again.")
+            seen[e] = a
     return out
+
+
+def cmd_doctor():
+    """The checks, and where setting up several accounts stands (Settings'
+    steps): {checks, accounts, signed}."""
+    checks = doctor_checks()
+    locals_ = claude_accounts()
+    unsigned = sum(1 for c in checks if c["id"].startswith("signed-in-"))
+    print(json.dumps({"checks": checks, "accounts": len(locals_), "signed": len(locals_) - unsigned}))
 
 
 def masked(e):
@@ -1620,7 +1633,7 @@ def main():
     elif cmd == "keychain":
         print(json.dumps(keychain_state()))
     elif cmd == "doctor":
-        print(json.dumps(doctor_checks()))
+        cmd_doctor()
     elif cmd == "diagnose":
         cmd_diagnose(*args[1:3])
     elif cmd == "log" and len(args) > 2:
