@@ -1330,10 +1330,11 @@ export default class Settings {
   // Local tab opens and on Check again: it may make macOS show a Keychain
   // dialog, which is the point (switching would show it anyway).
 
+  // Called from render too (the first time): no cx.notify() before the task,
+  // it throws during render. A click notifies after calling it.
   loadDoctor(cx) {
     if (this.orcha.doctorBusy) return;
     this.orcha.doctorBusy = true;
-    cx.notify();
     cx.spawn(async (cx) => {
       this.orcha.doctor = await readDoctor();
       this.orcha.doctorBusy = false;
@@ -1384,7 +1385,10 @@ export default class Settings {
           .items_center()
           .child(div().flex_1().text_size(14).text_color(t.foreground).child("Switching accounts on this Mac"))
           .child(div().text_size(12.5).text_color(bad ? t.blocked : t.dim).child(status))
-          .child(this.orcha.doctorBusy ? div().text_size(12.5).text_color(t.dim).child("…") : this.button(t, "doctor-again", "Check again", (_e, cx) => this.loadDoctor(cx))),
+          .child(this.orcha.doctorBusy ? div().text_size(12.5).text_color(t.dim).child("…") : this.button(t, "doctor-again", "Check again", (_e, cx) => {
+            this.loadDoctor(cx);
+            cx.notify();
+          })),
       )
       .child(div().text_size(12.5).text_color(t.dim).child("Moving a chat to another Claude account writes its sign-in into the macOS Keychain. Each line says what is missing and how to fix it."));
     for (const c of checks ?? []) {

@@ -273,7 +273,7 @@ export async function writeDiagnostics(version) {
 }
 
 /** The report on the clipboard, to paste into any AI chat. */
-export const copyDiagnostics = (path) => exec("/bin/sh", ["-c", 'pbcopy < "$1"', "sh", path]);
+export const copyDiagnostics = (path) => exec("/bin/sh", ["-c", 'LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 pbcopy < "$1"', "sh", path]);
 
 /** Shows the report in Finder. */
 export const revealDiagnostics = (path) => exec("open", ["-R", path]);
