@@ -114,13 +114,28 @@ rs = "editor:zed {path}:$L"
 
 ## Uninstall, and where the installer writes
 
-Everything lives in `~/.config/herdr-app` (or `$HERDR_APP_HOME`): `layouts/orcha.json`, `themes/orcha-*.json`, `mods/orcha/`, orcha's keys in `keys.json` (only for the orcha layout) and the Matcha theme in `settings.json` if you had none. Herdr's own files and yours are left alone. Orcherd's accounts and settings live in `~/.config/orcherd`, its fuel cache in `~/.cache/orcherd`: apart from the terminal orcha, which Orcherd doesn't need.
+The installer writes into `~/.config/herdr-app` (or `$HERDR_APP_HOME`): `layouts/orcha.json` and its `orcha.svg` preview, `themes/orcha-*.json`, `mods/orcha/`, orcha's keys in `keys.json` (only for the orcha layout) and the Matcha theme in `settings.json` if you had none. Herdr's own files and yours are left alone. Orcherd keeps its accounts and settings in `~/.config/orcherd`, its fuel cache in `~/.cache/orcherd` and its saved sign-ins in the Keychain (items named `orcherd-…`). None of it is the terminal orcha's, which Orcherd doesn't need.
+
+Quit Herdr first (`⌘Q`): `uninstall.sh` won't run while it's open, because Herdr writes these files as it goes.
 
 ```sh
-cd ~/.config/herdr-app && rm -rf layouts/orcha.json themes/orcha-*.json mods/orcha ~/.config/orcherd ~/.cache/orcherd
+curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/uninstall.sh | sh               # start over
+curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/uninstall.sh | sh -s -- --all  # leave for good
 ```
 
-Then `⌘⇧P` → `layout.switch` back to another layout.
+`sh uninstall.sh [--all]` does the same from a clone. Running it twice is safe.
+
+- **Both** remove the files listed above, plus what an install cut short left behind (`.orcha-install.*`, `*.orcha-tmp`). From `keys.json` they remove only the 7 keys the installer bound, so your own keys under `layout:orcha` stay. From `settings.json` they remove only an `orcha-*` theme, so a light or dark theme of yours stays. The layout pick in `shared.json` goes when it is `orcha`, and Herdr opens on its own layout. A JSON file that doesn't parse is left as it is.
+- **Without `--all`**, accounts, settings, projects and the Token Station pairing stay, so `install.sh` brings Orcherd back as it was. Afterwards, do `layout.switch` → orcha again.
+- **`--all`** also removes these:
+  - The Token Station pairing, through `tokenstation.py forget`: it releases what was borrowed and deletes the device key. Revoke the Mac on the hub's Machines page too.
+  - `~/.config/orcherd` and `~/.cache/orcherd`.
+  - Every `orcherd-…` Keychain item, plus the `Claude Code-credentials-…` item Claude kept for each account folder it removes.
+  - The mod's own store (`data/orcha*`) and the `orcha.*` keys in Herdr's `shared.json`.
+- **Chats stay.** An account folder under `~/.config/orcherd/claude` (or `station`) is mostly links into `~/.claude`: the links go, never what they point at. A folder with a real `projects` folder holds chats of its own, so it is kept and named.
+- **`--all` refuses while a chat runs** with `CLAUDE_CONFIG_DIR` in `~/.config/orcherd`. End that chat, or RETURN it to the default account, then run it again.
+- **Signed in afterwards:** plain `claude` keeps the account `~/.claude` is on now, and the script names it. Other accounts need `/login` if you add them back.
+- **Token Station's own client** (`~/.local/share/token-station-client`, for a Mac without Orcherd) shares the station files. When it is installed, `station*` files and the `orcherd-station-device` item stay; `tokenstation uninstall` removes them.
 
 
 ## For contributors

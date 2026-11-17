@@ -40,6 +40,22 @@ curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/install.
 
 **Stuck on an old whale?** 🦴 The pink pill updates you, then asks to restart Herdr. On 0.8.3 or older, clicking it may look like nothing happened: the update did land, Herdr just keeps running the old copy until you restart it (`⌘Q`, open it again). Still no luck, or older than 0.5 (no pill at all)? Run step 2 again, then restart Herdr. Accounts acting up? Settings › Accounts checks what switching needs and hands an AI agent a report to fix it.
 
+**Start over 🧹** Still broken after all that? Wipe the whale and install a fresh one. Quit Herdr (`⌘Q`, your agents keep running), then:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/uninstall.sh | sh
+```
+
+It takes Orcherd out of Herdr and nothing else: your accounts, settings and projects stay. Then do step 2 again, open Herdr, and step 4.
+
+**Leaving for good?** 🥲 Quit Herdr, then:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/uninstall.sh | sh -s -- --all
+```
+
+This also forgets everything Orcherd kept: saved accounts and their Keychain items, settings, projects, the fuel cache and the Token Station pairing. Your chats stay in `~/.claude`. Plain `claude` stays signed in to the account it's on now; the other accounts need `/login` again. Still running a chat on one of Orcherd's extra accounts? It stops and tells you to end that chat first. What it touches, case by case: [the boring part](docs/BORING.md#uninstall-and-where-the-installer-writes).
+
 ### 🪟 Windows
 
 Bad news, delivered with love: **the whale can't swim here yet.** 🐋🚫
