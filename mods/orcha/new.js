@@ -12,7 +12,7 @@ import { svg, image, div } from "gpui-kit";
 import { v_flex, InputState, Input } from "gpui-base";
 import { spaces, knownAgents, run, exec, pickFolder, props, closeOverlay, openOverlay, shared, setShared, notify } from "herdr";
 import { tokens, drawMenu, expandHome, openWorktree, fuelLeft } from "./ui.js";
-import { readAccounts, readProjectAccounts, setProjectAccount, startOn, isStation } from "./accounts-data.js";
+import { readAccounts, readProjectAccounts, setProjectAccount, startOn, notifyError, isStation } from "./accounts-data.js";
 import { location } from "./files.js";
 import { openImport } from "./import.js";
 
@@ -85,7 +85,7 @@ export default class New {
   // Claude on `account`, in a new tab of this project.
   start(agent, account) {
     startOn(account, { space: this.space?.id, name: agent.name }).then((failed) => {
-      if (failed) notify({ title: "The chat did not start", body: failed, level: "error", timeout: 8000 });
+      if (failed) notifyError({ title: "The chat did not start", body: failed, level: "error", timeout: 8000 });
       closeOverlay(props()?.overlay);
     });
     return true;
@@ -94,7 +94,7 @@ export default class New {
   // The ACCOUNT page's pick: the project's account from now on, and the Claude that waited for it.
   pick(account) {
     setProjectAccount(this.space?.folder, account.id).then((failed) => {
-      if (failed) return notify({ title: "The account was not saved", body: failed, level: "error" });
+      if (failed) return notifyError({ title: "The account was not saved", body: failed, level: "error" });
       this.account = account;
       setShared("orcha.fuelRev", Date.now()); // FUEL and the sidebar: who borrows changed
       if (this.starting) return this.start(this.starting, account);

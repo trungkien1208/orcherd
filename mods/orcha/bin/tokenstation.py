@@ -10,7 +10,7 @@ Orcherd without a hub works exactly as before.
                                          or on stdin: pair this Mac
   tokenstation.py sync                   heartbeat, then the hub's accounts into the cache
   tokenstation.py run <id> [claude args] lease hub account <id>, then become `claude` on it
-  tokenstation.py adopt <from> <to> <cwd>  let `claude --continue` in folder <to> find
+  tokenstation.py adopt <from> <to> <cwd> [session]  let `claude --continue` in folder <to> find
                                          the chat last had in <from> (- is ~/.claude)
   tokenstation.py forget                 unpair: key, settings, cache and leases gone
   tokenstation.py address <host:port>    move this pairing to the same hub at a new address
@@ -33,7 +33,9 @@ accounts, for ACCOUNTS and FUEL), station-leases/<lease>.json (one per pane
 on a hub account) and station-usage.json (how far the transcripts were
 read). Each hub account gets its own Claude folder,
 ~/.config/orcherd/station/<id>: ~/.claude's files linked in except
-`projects`, so its transcripts, and so its token use, are its own.
+`projects`, so its transcripts, and so its token use, are its own. `sync`
+copies those chats into ~/.claude/projects too (and keeps the copies up),
+so they are there to resume after going back to a local account.
 
 `run` sends Claude Code's Messages API requests through the hub. Its env has
 the machine key and the hub URL, never the setup-token. The hub checks the
@@ -357,6 +359,7 @@ def pair_with(url, pin, code, name=None):
 
 def cmd_forget():
     """Unpairs this Mac. The hub accounts' folders stay: their chats are yours."""
+    with_suppressed(share_back)
     link, key = read_json(LINK_FILE), kc_read()
     with locked():
         restore(link, key) if link and key else restore()
@@ -457,13 +460,14 @@ def projects_of(folder):
     return os.path.realpath(os.path.join(base, "projects"))
 
 
-def cmd_adopt(src, dst, cwd, every=False, if_newer=False):
+def cmd_adopt(src, dst, cwd, session=None, every=False, if_newer=False):
     """`claude --continue` in `dst` continues the newest chat of `cwd` it can
     see. A hub folder sees only its own, so the chat last had in `src` is
     linked into it (Claude then writes on through the link). every: all of
     that folder's chats, for `--resume`'s list. if_newer: it becomes the one
     `--continue` takes only if newer than the hub folder's own (a terminal's
-    "latest"); Orcherd's Restart wants the pane's own chat, always."""
+    "latest"); Orcherd's Restart wants the pane's own chat, always: `session`,
+    when it knows it, else the newest."""
     a, b = projects_of(src), projects_of(dst)
     if a == b:
         return
@@ -475,6 +479,8 @@ def cmd_adopt(src, dst, cwd, every=False, if_newer=False):
     if not chats:
         return
     newest = max(chats, key=os.path.getmtime)
+    if session and re.fullmatch(r"[0-9a-f-]{36}", session) and os.path.join(a, slug, session + ".jsonl") in chats:
+        newest = os.path.join(a, slug, session + ".jsonl")
     make_dir(os.path.join(b, slug))
     for chat in sorted(chats, key=os.path.getmtime) if every else [newest]:
         link = os.path.join(b, slug, os.path.basename(chat))
@@ -494,6 +500,68 @@ def cmd_adopt(src, dst, cwd, every=False, if_newer=False):
            if not os.path.islink(p) and os.stat(p).st_ino not in theirs]
     if not if_newer or not own or os.path.getmtime(newest) >= max(os.path.getmtime(f) for f in own):
         os.utime(os.path.join(b, slug, os.path.basename(newest)), follow_symlinks=True)
+
+
+def follow(src, dst):
+    """dst: a copy of src, kept up with it while it only grows. A copy a
+    local Claude has written to (its end no longer src's at that place) is
+    its own chat from then on and left alone. The copy keeps src's time, so
+    it is not taken for the newest chat it isn't."""
+    st = os.stat(src)
+    if not os.path.lexists(dst):
+        os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+        shutil.copy2(src, dst)
+        return
+    if os.path.islink(dst) or os.path.samefile(src, dst):
+        return  # adopt's link: one file already
+    size = os.path.getsize(dst)
+    if st.st_size <= size:
+        return
+    with open(src, "rb") as a, open(dst, "rb") as b:
+        tail = min(size, 4096)
+        b.seek(size - tail)
+        a.seek(size - tail)
+        if b.read(tail) != a.read(tail):
+            return  # not a copy of it (any more)
+        rest = a.read(st.st_size - size)
+    with open(dst, "ab") as b:
+        b.write(rest)
+    os.utime(dst, (st.st_atime, st.st_mtime))
+
+
+def share_back():
+    """A hub folder's chats, copied into ~/.claude/projects (every local
+    account's folder links that one) and kept up with, so a chat started on a
+    hub account is in --resume and --continue after going back to a local
+    account. A copy, not a link: a chat continued locally writes its own
+    file, never the hub folder's transcript (its token count) nor one a hub
+    pane is still writing. A name already taken there is left alone."""
+    if not os.path.isdir(FOLDERS):
+        return
+    dst_root = projects_of("-")
+    for aid in os.listdir(FOLDERS):
+        src_root = os.path.join(FOLDERS, aid, "projects")
+        if os.path.islink(src_root) or not os.path.isdir(src_root) or os.path.realpath(src_root) == dst_root:
+            continue
+        for slug in os.listdir(src_root):
+            src = os.path.join(src_root, slug)
+            if os.path.islink(src) or not os.path.isdir(src):
+                continue
+            chats = [n for n in os.listdir(src) if n.endswith(".jsonl")]
+            # a chat and the folder of the same name beside it (its subagents, tool results)
+            files = [n for n in chats if os.path.isfile(os.path.join(src, n)) and not os.path.islink(os.path.join(src, n))]
+            for n in chats:
+                side = os.path.join(src, n[:-len(".jsonl")])
+                if os.path.isdir(side) and not os.path.islink(side):
+                    for root, dirs, names in os.walk(side):
+                        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                        files += [os.path.relpath(os.path.join(root, f), src) for f in names
+                                  if not os.path.islink(os.path.join(root, f))]
+            for rel in files:
+                try:
+                    follow(os.path.join(src, rel), os.path.join(dst_root, slug, rel))
+                except OSError:
+                    pass  # a name Claude took meanwhile, a file gone: next time
 
 
 def wait_enter(text):
@@ -850,6 +918,7 @@ def sync(link):
 
 
 def cmd_sync():
+    with_suppressed(share_back)
     link = read_json(LINK_FILE)
     if link:  # not paired: nothing to do, nothing to say
         with locked():
@@ -1424,7 +1493,7 @@ def main(argv):
             cmd_sync()
         elif cmd == "run" and rest:
             cmd_run(rest[0], rest[1:])
-        elif cmd == "adopt" and len(rest) == 3:
+        elif cmd == "adopt" and len(rest) in (3, 4):
             cmd_adopt(*rest)
         elif cmd == "forget":
             cmd_forget()
@@ -1447,7 +1516,21 @@ def main(argv):
         else:
             sys.exit("\n\n".join(p for p in __doc__.split("\n\n") if p.lstrip().startswith("tokenstation.py")))
     except Fail as e:
+        log_error(f"station {cmd}", e)
         sys.exit(str(e))
+
+
+def log_error(where, message):
+    """A line into ~/.cache/orcherd/errors.log, which accounts.py diagnose
+    reads: what failed, never data. Best effort."""
+    try:
+        os.makedirs(CACHE, mode=0o700, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = " ".join(str(message).split())[:2000]
+        with open(os.open(os.path.join(CACHE, "errors.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as fh:
+            fh.write(f"{stamp} [{where}] {line}\n")
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

@@ -8,8 +8,8 @@ import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, s
 import { RULES, SKILLS } from "./catalog.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
-import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate } from "./version.js";
-import { readAccounts, tokenState, needsSignIn, makeDefault, refreshFuel, addAccount, renameAccount, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
+import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate, restartNeeded, restartHerdr } from "./version.js";
+import { readAccounts, tokenState, needsSignIn, makeDefault, notifyError, logFailure, readDoctor, installPython, installClaude, writeDiagnostics, copyDiagnostics, revealDiagnostics, fixWithAgent, moveToKeychain, unlockKeychain, openKeychainAccess, refreshFuel, addAccount, renameAccount, removeAccount, sameClaude, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
 
 // Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
 // is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
@@ -983,7 +983,7 @@ export default class Settings {
         info.file.text = after;
         info.rules = rulesIn(after);
       } catch (err) {
-        notify({ title: "The rules were not written", body: String(err), level: "error" });
+        notifyError({ title: "The rules were not written", body: String(err), level: "error" });
       }
       cx.notify();
     });
@@ -1014,7 +1014,7 @@ export default class Settings {
         // The row then offers the command, to run by hand in a terminal.
         const cd = global ? "" : `cd '${info.folder.replaceAll("'", "'\\''")}' && `;
         this.orcha.failed[`${global ? "" : info.folder}|${skill.name}`] = `${cd}npx ${skillArgs(skill, global).join(" ")}`;
-        notify({ title: `${skill.title} was not installed`, body: (r.stderr || r.stdout || "no internet?").trim().split("\n").pop(), level: "error" });
+        notifyError({ title: `${skill.title} was not installed`, body: (r.stderr || r.stdout || "no internet?").trim().split("\n").pop(), level: "error" });
       }
       this.loadProject(cx);
     });
@@ -1169,8 +1169,15 @@ export default class Settings {
       4,
       9,
     );
+    const waiting = restartNeeded();
     let status;
-    if (updating || this.orcha.busy.update) {
+    if (waiting) {
+      status = v_flex()
+        .gap(10)
+        .child(div().text_size(15).font_black().text_color(k.ink).child(`🐋 Orcherd ${waiting} is installed`))
+        .child(div().text_size(12.5).text_color(k.muted).child(`Herdr still runs ${VERSION} until it restarts. Your agents keep running.`))
+        .child(h_flex().gap(10).items_center().child(big("whale-restart", "Restart Herdr 🔁", () => restartHerdr())));
+    } else if (updating || this.orcha.busy.update) {
       status = v_flex()
         .gap(4)
         .child(div().text_size(15).font_black().text_color(k.ink).child("Releasing the whale… 🐋💨"))
@@ -1221,6 +1228,7 @@ export default class Settings {
       .gap(18)
       .child(hero)
       .child(v_flex().gap(6).child(this.heading(t, "Updates")).child(status))
+      .child(v_flex().child(this.heading(t, "Help")).child(this.diagnostics(t)))
       .child(
         v_flex()
           .gap(8)
@@ -1243,7 +1251,10 @@ export default class Settings {
     cx.spawn(async (cx) => {
       const failed = await runUpdate(version);
       delete this.orcha.busy.update;
-      if (failed) notify({ title: "The whale got stuck 🐋🪤", body: failed, level: "error" });
+      if (failed) {
+        notifyError({ title: "The whale got stuck 🐋🪤", body: `${failed}\nOr in Terminal: curl -fsSL https://raw.githubusercontent.com/${REPO}/HEAD/install.sh | sh`, level: "error", timeout: 20000 });
+        logFailure("update", failed);
+      }
       cx.notify();
     });
   }
@@ -1269,9 +1280,27 @@ export default class Settings {
     if (!id) return;
     cx.spawn(async (cx) => {
       const failed = await renameAccount(id, this.accountNameInput.value());
-      if (failed) notify({ title: "The name was not changed", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The name was not changed", body: failed, level: "error" });
       else {
         this.orcha.renaming = null;
+        setShared("orcha.fuelRev", Date.now());
+      }
+      this.loadAccounts(cx);
+    });
+  }
+
+  // Remove: the account goes from this Mac; its chats stay in ~/.claude.
+  removeAccount(a, cx) {
+    if (this.orcha.busy[a.id]) return;
+    this.orcha.busy[a.id] = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const { failed, kept } = await removeAccount(a);
+      delete this.orcha.busy[a.id];
+      this.orcha.removing = null;
+      if (failed) notifyError({ title: `${a.label ?? a.id} was not removed`, body: failed, level: "error", timeout: 8000 });
+      else {
+        notify({ title: `${a.label ?? a.id} removed`, body: kept ?? "Its sign-in on this Mac is gone. Your chats stay.", level: "success", timeout: 6000 });
         setShared("orcha.fuelRev", Date.now());
       }
       this.loadAccounts(cx);
@@ -1291,9 +1320,163 @@ export default class Settings {
         this.orcha.mainOn = a.id;
         setShared("orcha.fuelRev", Date.now());
         notify({ title: back ? `Back on ${a.label ?? a.id}` : `${a.label ?? a.id} is the default now`, body: "New chats start on it, and the chats in the main folder (~/.claude) move to it within half a minute. A chat started in another account's folder stays there.", level: "success", timeout: 6000 });
-      } else notify({ title: "The default was not changed", body: failed, level: "error" });
+      } else notifyError({ title: "The default was not changed", body: failed, level: "error" });
       cx.notify();
     });
+  }
+
+  // Switching accounts: what it needs on this Mac (accounts.py doctor), the
+  // fix for each part that is missing, and how to set it up. Read when the
+  // Local tab opens and on Check again: it may make macOS show a Keychain
+  // dialog, which is the point (switching would show it anyway).
+
+  loadDoctor(cx) {
+    if (this.orcha.doctorBusy) return;
+    this.orcha.doctorBusy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      this.orcha.doctor = await readDoctor();
+      this.orcha.doctorBusy = false;
+      cx.notify();
+    });
+  }
+
+  doctorFix(t, c, cx) {
+    const go = (label, work) => this.button(t, `doctor-fix-${c.id}`, label, work);
+    switch (c.fix) {
+      case "install-python":
+        return go("Install tools", () => installPython());
+      case "install-claude":
+        return go("Install Claude Code", () => installClaude());
+      case "unlock":
+        return go("Unlock", () => unlockKeychain());
+      case "keychain-access":
+        return go("Keychain Access", () => openKeychainAccess());
+      case "move":
+        return go("Move to Keychain", (_e, cx) =>
+          cx.spawn(async (cx) => {
+            const failed = await moveToKeychain();
+            if (failed) notifyError({ title: "The sign-in stayed in the file", body: failed, level: "error" });
+            this.loadDoctor(cx);
+          }),
+        );
+      default:
+        return null;
+    }
+  }
+
+  readiness(t, cx) {
+    const checks = this.orcha.doctor;
+    if (!checks && !this.orcha.doctorBusy) this.loadDoctor(cx);
+    const bad = (checks ?? []).filter((c) => c.ok === false).length;
+    const mark = (ok) => (ok === true ? "✅" : ok === false ? "❌" : "⚠️");
+    const open = this.orcha.guideOpen ?? Boolean(bad);
+    const status = !checks ? (this.orcha.doctorBusy ? "checking…" : "") : bad ? `${bad} to fix` : "ready ✓";
+    const box = v_flex()
+      .w_full()
+      .gap(6)
+      .py(12)
+      .border_b(1)
+      .border_color(t.border)
+      .child(
+        h_flex()
+          .gap(10)
+          .items_center()
+          .child(div().flex_1().text_size(14).text_color(t.foreground).child("Switching accounts on this Mac"))
+          .child(div().text_size(12.5).text_color(bad ? t.blocked : t.dim).child(status))
+          .child(this.orcha.doctorBusy ? div().text_size(12.5).text_color(t.dim).child("…") : this.button(t, "doctor-again", "Check again", (_e, cx) => this.loadDoctor(cx))),
+      )
+      .child(div().text_size(12.5).text_color(t.dim).child("Moving a chat to another Claude account writes its sign-in into the macOS Keychain. Each line says what is missing and how to fix it."));
+    for (const c of checks ?? []) {
+      const fix = c.ok === false ? this.doctorFix(t, c, cx) : null;
+      box.child(
+        h_flex()
+          .w_full()
+          .gap(10)
+          .py(4)
+          .items_start()
+          .child(div().w(20).flex_none().text_size(13).child(mark(c.ok)))
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(2)
+              .child(div().text_size(13).text_color(c.ok === false ? t.foreground : t.muted).child(c.title))
+              .when(Boolean(c.detail) && c.ok !== true, (el) => el.child(div().text_size(12).text_color(t.dim).child(c.detail))),
+          )
+          .when(Boolean(fix), (el) => el.child(fix)),
+      );
+    }
+    const steps = [
+      "Add each Claude account below: give it a name, then Add and sign in. A browser opens: pick that claude.ai account. If it signs in the wrong one, sign out of claude.ai first or open the link in a private window.",
+      "Each account gets a folder of its own; your chats, settings and skills are shared between them.",
+      "Make default: the account new chats start on.",
+      "Move a chat: click FUEL or 👤 in the header, then SWITCH on an account: KEEP RUNNING (no restart), RESTART (only this chat) or NEW PANE.",
+      "If macOS asks for the Keychain: type your Mac's password and click Always Allow, not Allow.",
+      "Settings › Hand-off moves chats before an account runs dry.",
+    ];
+    return box
+      .child(
+        div()
+          .id("doctor-guide")
+          .pt(4)
+          .text_size(12.5)
+          .text_color(t.accent)
+          .cursor_pointer()
+          .on_click((_e, cx) => {
+            this.orcha.guideOpen = !open;
+            cx.notify();
+          })
+          .child(open ? "▾ How to set up several accounts" : "▸ How to set up several accounts"),
+      )
+      .when(open, (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .pl(4)
+            .children(steps.map((s, i) => h_flex().gap(8).items_start().child(div().w(16).flex_none().text_size(12.5).text_color(t.dim).child(`${i + 1}.`)).child(div().flex_1().min_w(0).text_size(12.5).text_color(t.muted).child(s)))),
+        ),
+      );
+  }
+
+  // Something wrong: a report (accounts.py diagnose) for an AI agent to read
+  // and fix with you: in a new Claude tab, or on the clipboard for any chat.
+  diagnostics(t) {
+    const busy = this.orcha.busy.diagnose;
+    const make = (then) => (_e, cx) => {
+      if (this.orcha.busy.diagnose) return;
+      this.orcha.busy.diagnose = true;
+      cx.notify();
+      cx.spawn(async (cx) => {
+        const { path, failed } = await writeDiagnostics(VERSION);
+        delete this.orcha.busy.diagnose;
+        if (failed) notifyError({ title: "The report was not written", body: failed, level: "error" });
+        else await then(path);
+        cx.notify();
+      });
+    };
+    return v_flex()
+      .w_full()
+      .gap(6)
+      .py(12)
+      .border_b(1)
+      .border_color(t.border)
+      .child(div().text_size(14).text_color(t.foreground).child("Something not working?"))
+      .child(div().text_size(12.5).text_color(t.dim).child("Writes a report with the versions, the checks above, your accounts (emails masked, no tokens) and the recent errors, for an AI agent to find the cause and fix it with you."))
+      .child(
+        h_flex()
+          .gap(8)
+          .pt(4)
+          .child(busy ? div().text_size(12.5).text_color(t.dim).child("writing the report…") : this.button(t, "diag-fix", "Fix with Claude", make((path) => fixWithAgent(path))))
+          .when(!busy, (el) =>
+            el
+              .child(this.button(t, "diag-copy", "Copy report", make(async (path) => {
+                await copyDiagnostics(path);
+                notify({ title: "The report is on the clipboard", body: "Paste it into any AI chat and ask it to fix Orcherd.", level: "success", timeout: 5000 });
+              })))
+              .child(this.button(t, "diag-show", "Show in Finder", make((path) => revealDiagnostics(path)))),
+          ),
+      );
   }
 
   accounts(t, cx) {
@@ -1310,12 +1493,16 @@ export default class Settings {
         ? "Hub accounts run through Token Station. Start day on the hub before opening a chat."
         : "Local accounts use this Mac's sign-ins. New Claude chats start on the default. To move the chat in front of you, open ACCOUNTS: click FUEL, or 👤 in the header."));
     if (hubTab) out.child(this.stationSection(t));
+    else out.child(this.readiness(t, cx));
     for (const a of (this.orcha.accounts ?? []).filter((a) => isStation(a) === hubTab)) {
       const inUse = a.kind === "claude" && a.id === this.orcha.active;
       // The default's chats were kept running on another account: the main folder holds that one now.
       const lent = inUse && this.orcha.mainOn && this.orcha.mainOn !== a.id ? (this.orcha.accounts ?? []).find((x) => x.id === this.orcha.mainOn) ?? null : null;
       const gauges = [fuelGauge(k, "5H", a.limits.session), fuelGauge(k, "WEEK", a.limits.weekly), fuelGauge(k, "MONTH", a.limits.monthly)].filter(Boolean);
       const token = tokenState(a);
+      // Another local account signed in as the same email: one Claude account, one fuel.
+      const twin = !isStation(a) && a.kind === "claude" ? (this.orcha.accounts ?? []).find((x) => x.id !== a.id && !isStation(x) && x.kind === "claude" && sameClaude(a, x)) ?? null : null;
+      const removing = this.orcha.removing === a.id && !this.orcha.busy[a.id];
       const control =
         isStation(a)
           ? div().text_size(12.5).text_color(a.why ? t.blocked : t.dim).child(a.why ?? "from the hub")
@@ -1351,9 +1538,22 @@ export default class Settings {
                       this.accountNameInput.set_value(a.label ?? a.id);
                       this.accountNameInput.focus();
                       cx.notify();
-                    }).child("Rename")))).child(div().text_size(12.5).text_color(t.dim).child(a.email ?? a.limits.note ?? "")).when(Boolean(token), (el) => el.child(div().text_size(12).text_color(token.signIn ? t.blocked : t.dim).child(token.text))))
+                    }).child("Rename")))
+                    .when(!isStation(a), (el) => el.child(div().id(`acc-remove-${a.id}`).px(6).rounded(5).text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => {
+                      this.orcha.removing = a.id;
+                      cx.notify();
+                    }).child("Remove")))).child(div().text_size(12.5).text_color(t.dim).child(a.email ?? a.limits.note ?? "")).when(Boolean(twin), (el) => el.child(div().text_size(12).text_color(t.blocked).child(`Same Claude account as ${twin?.label ?? twin?.id}: one fuel. Remove one of them.`))).when(Boolean(token), (el) => el.child(div().text_size(12).text_color(token.signIn ? t.blocked : t.dim).child(token.text))))
               .child(control),
           )
+          .when(removing, (el) => el.child(v_flex().gap(8)
+            .child(div().text_size(12.5).text_color(t.muted).child(inUse
+              ? `${a.label ?? a.id} is the default. Make another account the default first.`
+              : a.kind === "claude" && a.id === this.orcha.mainOn
+                ? `The main folder's chats (~/.claude) borrow ${a.label ?? a.id} now. RETURN them first (on the default account above).`
+                : `Remove ${a.label ?? a.id}? Its sign-in and fuel on this Mac go; your chats stay. Add it again any time.`))
+            .child(h_flex().gap(6)
+              .child(this.button(t, `acc-remove-cancel-${a.id}`, "Cancel", (_e, cx) => { this.orcha.removing = null; cx.notify(); }))
+              .when(!inUse && !(a.kind === "claude" && a.id === this.orcha.mainOn), (el) => el.child(this.button(t, `acc-remove-confirm-${a.id}`, "Remove account", (_e, cx) => this.removeAccount(a, cx)))))))
           .when(Boolean(lent), (el) => el.child(div().text_size(12).text_color(t.muted).child(`Its chats in the main folder (~/.claude) borrow ${lent.label ?? lent.id} now, and new chats start there too. Return puts them back on ${a.label ?? a.id}, no restart.`)))
           .children(gauges),
       );
@@ -1401,6 +1601,7 @@ export default class Settings {
         )
         .when(!claude && !added, (el) => el.child(h_flex().pt(4).child(addButton))),
     );
+    if (!hubTab) out.child(this.diagnostics(t));
     return out.child(
       h_flex()
         .pt(14)
@@ -1463,7 +1664,7 @@ export default class Settings {
       try {
         await work();
       } catch (error) {
-        notify({ title: "Token Station failed", body: String(error), level: "error", timeout: 8000 });
+        notifyError({ title: "Token Station failed", body: String(error), level: "error", timeout: 8000 });
       } finally {
         delete this.orcha.busy.station;
         this.loadAccounts(cx);
@@ -1475,7 +1676,7 @@ export default class Settings {
   stationCheck(cx) {
     this.stationRun(cx, "checking…", async () => {
       const probe = await stationProbe(this.stationUrlInput.value());
-      if (probe.error) notify({ title: "No hub there", body: probe.error, level: "error" });
+      if (probe.error) notifyError({ title: "No hub there", body: probe.error, level: "error" });
       else {
         this.orcha.stationProbe = probe;
         this.stationCodeInput.focus();
@@ -1488,7 +1689,7 @@ export default class Settings {
     if (!probe) return;
     this.stationRun(cx, "pairing…", async () => {
       const failed = await stationPair(probe.url, this.stationCodeInput.value(), probe.pin);
-      if (failed) notify({ title: "Not paired", body: failed, level: "error" });
+      if (failed) notifyError({ title: "Not paired", body: failed, level: "error" });
       else {
         this.orcha.stationProbe = null;
         this.stationCodeInput.set_value("");
@@ -1504,7 +1705,7 @@ export default class Settings {
   stationMove(cx) {
     this.stationRun(cx, "changing address…", async () => {
       const failed = await stationAddress(this.stationAddressInput.value());
-      if (failed) notify({ title: "Address unchanged", body: failed, level: "error", timeout: 8000 });
+      if (failed) notifyError({ title: "Address unchanged", body: failed, level: "error", timeout: 8000 });
       else {
         this.stationAddressInput.set_value("");
         notify({ title: "Hub address changed", body: "Restart any running hub panes so Claude Code uses the new address.", level: "success", timeout: 8000 });
@@ -1522,7 +1723,7 @@ export default class Settings {
     this.stationRun(cx, "unpairing…", async () => {
       const failed = await stationForget();
       if (failed) {
-        notify({ title: "Unpair failed", body: failed, level: "error", timeout: 8000 });
+        notifyError({ title: "Unpair failed", body: failed, level: "error", timeout: 8000 });
         return;
       }
       notify({ title: "Unpaired", body: "Hub accounts are gone from this Mac; their chats stay in ~/.config/orcherd/station. Revoke this Mac on the hub too.", level: "success", timeout: 8000 });
@@ -1545,7 +1746,7 @@ export default class Settings {
       const kind = this.orcha.addKind;
       const failed = await addAccount(kind === "claude" ? this.accountInput.value() : "", kind);
       delete this.orcha.busy.add;
-      if (failed) notify({ title: "The account was not added", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The account was not added", body: failed, level: "error" });
       else {
         if (kind === "claude") this.accountInput.set_value("");
         notify({ title: "Sign in beside your work", body: "When it says you're in, press Enter there.", level: "success", timeout: 6000 });
@@ -1571,7 +1772,7 @@ export default class Settings {
     cx.spawn(async (cx) => {
       const failed = await writeHandoff(key, value);
       if (failed) {
-        notify({ title: "Not saved", body: failed, level: "error" });
+        notifyError({ title: "Not saved", body: failed, level: "error" });
         this.loadHandoff(cx);
       }
     });

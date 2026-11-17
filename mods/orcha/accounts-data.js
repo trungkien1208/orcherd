@@ -6,7 +6,7 @@
 // Fuel, signing in and switching go through bin/accounts.py, which ships
 // with this mod: the Keychain and the account folders stay in one place.
 
-import { readTextFile, writeTextFile, exec, hc, home, run, focused, agents, panes, spaces } from "herdr";
+import { readTextFile, writeTextFile, exec, hc, home, run, focused, agents, panes, spaces, notify, updates } from "herdr";
 import { agentTitle, expandHome } from "./ui.js";
 import { readTable, writeKey } from "./config.js";
 import { configFile, cacheFile, script, makeConfigDir } from "./paths.js";
@@ -226,6 +226,76 @@ export function openKeychainAccess() {
   return exec("open", ["-a", "Keychain Access"]);
 }
 
+// What switching needs, and a report for an AI agent ------------------
+// accounts.py doctor / diagnose / log. Settings › Accounts shows the checks
+// and the setup steps; the report goes to an agent or the clipboard.
+
+const PYTHON_MISSING = [{
+  id: "python",
+  ok: false,
+  title: "python3 is missing",
+  detail: "Orcherd switches accounts with python3, which comes with Apple's Command Line Tools. Install them (xcode-select --install), then press Check again.",
+  fix: "install-python",
+}];
+
+/** [{ id, ok: true | false | null, title, detail, fix }]: what moving chats
+ *  between Claude accounts needs on this Mac. Up to a minute: macOS may be
+ *  showing a Keychain dialog that waits for the user. */
+export async function readDoctor() {
+  const r = await exec("python3", ["-I", LIMITS(), "doctor"], { timeout: 60000 }).catch(() => null);
+  if (!r || /xcode-select|command line developer tools|No developer tools/i.test(`${r.stderr}`)) return PYTHON_MISSING;
+  try {
+    if (r.code === 0) return JSON.parse(r.stdout);
+  } catch {}
+  return [{ id: "doctor", ok: false, title: "The checks could not run", detail: lastLine(r, "accounts.py failed"), fix: null }];
+}
+
+/** Apple's Command Line Tools installer (python3 comes with it). */
+export const installPython = () => exec("xcode-select", ["--install"]).catch(() => null);
+
+/** A pane beside the focused one installs Claude Code. */
+export function installClaude() {
+  const script = 'curl -fsSL https://claude.ai/install.sh | bash; printf "\nBack in Settings › Accounts, press Check again. Enter closes this pane. "; read -r _';
+  run("pane.split", { direction: "right", argv: ["sh", "-c", script] });
+}
+
+/** Writes ~/.cache/orcherd/diagnostics.md: versions, the checks, the
+ *  accounts (emails masked, no tokens), the recent errors. { path } or { failed }. */
+export async function writeDiagnostics(version) {
+  let herdr = "?";
+  try {
+    const u = updates();
+    herdr = `${u.app.version}${u.core.version ? ` (herdr-core ${u.core.version})` : ""}`;
+  } catch {}
+  const r = await exec("python3", ["-I", LIMITS(), "diagnose", version, herdr], { timeout: 90000 }).catch((err) => ({ code: 1, stderr: String(err?.message ?? err) }));
+  if (r.code !== 0) return { failed: lastLine(r, "accounts.py failed") };
+  return { path: r.stdout.trim().split("\n").pop() };
+}
+
+/** The report on the clipboard, to paste into any AI chat. */
+export const copyDiagnostics = (path) => exec("/bin/sh", ["-c", 'pbcopy < "$1"', "sh", path]);
+
+/** Shows the report in Finder. */
+export const revealDiagnostics = (path) => exec("open", ["-R", path]);
+
+/** A new tab with Claude, told to read the report and fix what it finds with the user. */
+export function fixWithAgent(path) {
+  const task = `Read ${path}: a diagnostics report from Orcherd (orcha for the Herdr app) on this Mac. Follow its "For the AI agent reading this" section: find why it fails (most likely switching Claude accounts) and fix it with me. Never print or move a sign-in's secret, and ask me before deleting anything.`;
+  run("tab.new", { name: "Fix Orcherd", folder: home(), argv: ["claude"], task });
+}
+
+/** An error the app showed, into errors.log for the report. Never awaited. */
+export function logFailure(where, text) {
+  if (!text) return;
+  exec("python3", ["-I", LIMITS(), "log", String(where).slice(0, 40), String(text).slice(0, 2000)]).catch(() => null);
+}
+
+/** notify() for an error, which also goes to errors.log. */
+export function notifyError(n) {
+  logFailure(n.title, n.body);
+  return notify(n);
+}
+
 /** Reads the accounts' fuel into the cache (network). Accounts read in the
  *  last two minutes are skipped, unless `fresh` (someone asked for it). */
 export async function refreshFuel(fresh = false) {
@@ -322,20 +392,30 @@ export async function claudeAccountOf(terminal) {
  *  (`others` besides this one), borrowing the account; the default account
  *  stays as it is. */
 export async function keepInfo(from) {
-  if (!from?.terminal) return { why: "Click into an agent first.", others: 0 };
+  if (!from?.terminal) return { why: "Click into an agent first.", others: 0, home: null };
   const claudes = panes().filter((p) => p.terminal && p.terminal !== from.terminal && p.program?.key?.includes("claude"));
   const [folder, ...folders] = await configFolders([from.terminal, ...claudes.map((p) => p.terminal)]);
-  if (folder.startsWith(STATION_DIR())) return { why: "this chat runs through the hub relay: restart it onto another account instead", others: 0 };
-  return { why: null, others: folders.filter((f) => f === folder).length };
+  if (folder.startsWith(STATION_DIR())) return { why: "this chat runs through the hub relay: restart it onto another account instead", others: 0, home: null };
+  // The folder's own account: keep running onto it ends a borrow (RETURN).
+  const { list, main } = await readAccounts();
+  const home = folder === "-" ? main : list.find((a) => a.kind === "claude" && !isStation(a) && claudeDir(a) === folder)?.id ?? null;
+  return { why: null, others: folders.filter((f) => f === folder).length, home };
 }
+
+/** Whether keep running onto `account` would move other chats too: a
+ *  sign-in belongs to a config folder, not a pane. Only a chat alone in its
+ *  folder borrows that way; RETURN (onto the folder's own account) puts a
+ *  borrow back for all of them. */
+export const keepMovesOthers = (keep, account) => Boolean(keep?.others) && account?.id !== keep?.home;
 
 /** The chat keeps running on `account`'s sign-in, no restart: Claude reads it
  *  again within half a minute, and FUEL shows it BORROWED. Chats sharing its
  *  folder move with it (keepInfo). Null, or why not. */
 export async function keepRunningOn(account, from) {
   if (isStation(account)) return "A running chat needs a restart to use a hub account: its relay endpoint is set when Claude Code starts. Restart the chat onto it, or open a new pane.";
-  const { why } = await keepInfo(from);
-  if (why) return why;
+  const keep = await keepInfo(from);
+  if (keep.why) return keep.why;
+  if (keepMovesOthers(keep, account)) return `${keep.others} other chat${keep.others === 1 ? " shares" : "s share"} this chat's folder and would move to ${account.label ?? account.id} too. RESTART moves only this chat.`;
   // Whoever asks (ACCOUNTS, the low-fuel watch): a Keychain that can't take
   // the sign-in would leave the chat where it was, with a note saying it moved.
   const blocked = keychainBlocks(await readKeychain());
@@ -411,9 +491,9 @@ export async function startOn(account, { space, name } = {}) {
     tab([argv]);
     return null;
   }
-  const dir = claudeDir(account);
   const why = await folderTaken(account);
   if (why) return why;
+  const dir = claudeDir(account);
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
   tab(dir ? ["env", `CLAUDE_CONFIG_DIR=${dir}`, "claude"] : ["claude"]);
   return null;
@@ -423,16 +503,27 @@ export async function startOn(account, { space, name } = {}) {
 // that folder now: another account's, after a chat there was kept running on
 // it (or, in the main folder, after the default changed). Why `account`
 // can't start in its folder now, or null. Starting anyway would open a chat
-// that says one account and burns another.
+// that says one account and burns another. The account of the main folder
+// (no folder of its own) gets one when another account is in the main
+// folder (accounts.py seat): `account.dir` is set then, so callers read
+// claudeDir(account) after this.
 async function folderTaken(account) {
   const dir = claudeDir(account);
   const holder = await holderOf(dir ?? "-");
   if (holder === account.id) return null;
-  const { list } = await readAccounts();
   const name = account.label ?? account.id;
+  if (!dir) {
+    const r = await exec("python3", ["-I", LIMITS(), "seat", account.id]);
+    if (r.code !== 0) return `${name} lives in the main Claude folder (~/.claude), which another account holds now, and it could not get a folder of its own: ${lastLine(r, "accounts.py failed")}`;
+    account.dir = r.stdout.trim().split("\n").pop();
+    return claudeDir(account) ? null : `${name} could not get a folder of its own.`;
+  }
+  // Lent by a chat kept running there: given back when that chat is gone.
+  await exec("python3", ["-I", LIMITS(), "free", account.id]);
+  if ((await holderOf(dir)) === account.id) return null;
+  const { list } = await readAccounts();
   const other = list.find((a) => a.id === holder)?.label ?? "another account";
-  if (!dir) return `${name} lives in the main Claude folder (~/.claude), and ${other} is in it now. Make ${name} the default (Settings › Accounts), or KEEP RUNNING a chat onto it.`;
-  return `${name}'s folder is lent to ${other} now: a chat there was kept running on it. RETURN that chat first (ACCOUNTS, from that chat), or KEEP RUNNING this chat onto ${name}.`;
+  return `${name}'s folder is lent to ${other} now: a chat there was kept running on it. RETURN that chat first (ACCOUNTS, from that chat).`;
 }
 
 /** "Personal Mac" → "personal-mac" (orcha's account_slug). */
@@ -517,6 +608,21 @@ export async function renameAccount(id, name) {
     return "config.json changed meanwhile. Try again.";
   }
   return null;
+}
+
+/** Takes a local account off this Mac (accounts.py remove): config.json, its
+ *  sign-ins in the Keychain, its fuel, its folder (~/.claude's chats stay:
+ *  the folder only links to them). Not the default account, nor one a chat
+ *  runs on now. Null, or why not; `kept`: a note on what stayed. */
+export async function removeAccount(account) {
+  if (isStation(account)) return { failed: "A hub account is removed on the hub." };
+  const panes = await readPaneAccounts();
+  const dir = claudeDir(account);
+  const running = Object.values(panes).filter((p) => p.id === account.id || (dir && p.folder === dir)).length;
+  if (running) return { failed: `${running} chat${running === 1 ? " runs" : "s run"} on ${account.label ?? account.id}. Close ${running === 1 ? "it" : "them"} or move ${running === 1 ? "it" : "them"} to another account first.` };
+  const r = await exec("python3", ["-I", LIMITS(), "remove", account.id]);
+  if (r.code !== 0) return { failed: lastLine(r, "accounts.py failed") };
+  return { failed: null, kept: r.stdout.trim() || null };
 }
 
 // Hand-off settings ------------------------------------------------------
@@ -631,9 +737,9 @@ export async function handOff(account, { checklistFile = HANDOFF_DEFAULTS.checkl
   if (isStation(account)) {
     argv = ["python3", "-I", STATION(), "run", account.stationId, ...argv.slice(1)];
   } else {
-    const dir = account.kind === "claude" ? claudeDir(account) : null;
     const taken = account.kind === "claude" ? await folderTaken(account) : null;
     if (taken) return taken;
+    const dir = account.kind === "claude" ? claudeDir(account) : null;
     if (dir) {
       await exec("python3", ["-I", LIMITS(), "link", account.id]);
       argv = ["env", `CLAUDE_CONFIG_DIR=${dir}`, ...argv];
@@ -652,30 +758,75 @@ export async function restartOn(account) {
   if (!from?.terminal) return "Click into an agent first.";
   if (account.kind !== "claude" || !from.program?.key?.includes("claude")) return "Restarting on another account works from Claude to Claude.";
   // A hub folder sees only its own chats: the one in this pane is linked
-  // across first, so --continue goes on with it. Local to local needs nothing.
+  // across first, so it goes on there. Local to local needs nothing.
   const fromFolder = await configFolder(from.terminal);
-  const adopt = (to) => exec("python3", ["-I", STATION(), "adopt", fromFolder, to, from.cwd ?? home()]);
+  // This pane's own chat, by its session: --continue takes the folder's
+  // newest chat in that directory, another pane's when two work there.
+  const chat = await paneSession(from.terminal, fromFolder);
+  const cwd = chat?.cwd ?? from.cwd ?? home();
+  const adopt = (to) => exec("python3", ["-I", STATION(), "adopt", fromFolder, to, cwd, ...(chat ? [chat.id] : [])]);
+  const again = chat ? `--resume ${chat.id}` : "--continue";
   if (isStation(account)) {
     if (account.why) return `${account.label}: ${account.why}.`;
     await adopt(`${STATION_DIR()}${account.stationId}`);
-    return typeContinue(from, `python3 -I '${STATION().replace(/'/g, "'\\''")}' run ${account.stationId} --continue`);
+    return typeContinue(from, `python3 -I '${STATION().replace(/'/g, "'\\''")}' run ${account.stationId} ${again}`);
   }
-  const dir = claudeDir(account);
   const taken = await folderTaken(account);
   if (taken) return taken;
+  const dir = claudeDir(account);
   if (dir) await exec("python3", ["-I", LIMITS(), "link", account.id]);
   if (fromFolder.startsWith(STATION_DIR())) await adopt(dir ?? "-");
   // Typed into the pane's shell: the folder quoted, so a space or a quote in it stays a name.
   const env = dir ? `env CLAUDE_CONFIG_DIR='${dir.replace(/'/g, "'\\''")}'` : "env -u CLAUDE_CONFIG_DIR";
-  return typeContinue(from, `${env} claude --continue`);
+  return typeContinue(from, `${env} claude ${again}`);
 }
 
-/** Ctrl+C twice leaves Claude Code; then the shell runs `command`. Null, or why not. */
+// Claude Code writes <config folder>/sessions/<pid>.json for each running
+// chat ({ sessionId, cwd }); every account and hub folder links ~/.claude's.
+// The chat in a terminal: { id, cwd }, or null when it can't be told.
+async function paneSession(terminal, folder) {
+  let pid;
+  try {
+    pid = JSON.parse((await hc(["get", "--json", terminal])).stdout).foreground?.pid;
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid)) return null;
+  const base = !folder || folder === "-" ? `${home()}/.claude` : folder;
+  const info = (await readJson(`${base}/sessions/${pid}.json`)) ?? (await readJson(`${home()}/.claude/sessions/${pid}.json`));
+  const id = info?.pid === pid ? info.sessionId : null;
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id)) return null;
+  return { id, cwd: typeof info.cwd === "string" && info.cwd ? info.cwd : null };
+}
+
+// The pane's own shell is in front again: its foreground process is the
+// terminal's first one. False when it can't be read.
+async function shellInFront(terminal) {
+  try {
+    const t = JSON.parse((await hc(["get", "--json", terminal])).stdout);
+    return t.foreground?.pid != null && t.foreground.pid === t.pid;
+  } catch {
+    return false;
+  }
+}
+
+/** Ctrl+C twice leaves Claude Code; then the shell runs `command`. Null, or why not.
+ *  It waits for the shell to be in front, not a fixed time: Claude can take
+ *  longer to close, and the command typed before that lands in its chat box.
+ *  Ctrl+C goes again while Claude stays: the first press may only clear a
+ *  half-typed prompt or stop a turn. Nothing is typed if Claude never leaves. */
 async function typeContinue(from, command) {
-  await hc(["keys", from.terminal, "ctrl+c"]);
-  await pause(0.4);
-  await hc(["keys", from.terminal, "ctrl+c"]);
-  await pause(1);
+  let gone = false;
+  for (let round = 0; round < 3 && !gone; round++) {
+    await hc(["keys", from.terminal, "ctrl+c"]);
+    await pause(0.4);
+    if (!(await shellInFront(from.terminal))) await hc(["keys", from.terminal, "ctrl+c"]);
+    for (let i = 0; i < (round < 2 ? 8 : 40) && !gone; i++) {
+      await pause(0.25);
+      gone = await shellInFront(from.terminal);
+    }
+  }
+  if (!gone) return "Claude didn't close in this pane, so nothing was typed. Leave it (Ctrl+C twice) and restart again.";
   const r = await hc(["send", from.terminal, command]);
   return r.code === 0 ? null : lastLine(r, "hc send failed");
 }

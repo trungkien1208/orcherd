@@ -22,7 +22,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, notify, setShared, spaces } from "herdr";
-import { readAccounts, readProjectAccounts, setProjectAccount, tokenState, needsSignIn, refreshFuel, addAccount, renameAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
+import { readAccounts, readProjectAccounts, setProjectAccount, tokenState, notifyError, needsSignIn, refreshFuel, addAccount, renameAccount, signIn, handOff, restartOn, keepRunningOn, keepInfo, keepMovesOthers, startOn, claudeAccountOf, readHandoff, focusedAgent, readKeychain, keychainBlocks, moveToKeychain, unlockKeychain, openKeychainAccess, isStation, sameClaude } from "./accounts-data.js";
 import { tokens, raised, chip, button, icon, fuelGauge, fuelLeft, readable, agentFacts } from "./ui.js";
 
 // The fuel left on an account by its tighter limit, or null when none was read.
@@ -163,7 +163,7 @@ export default class Accounts {
     cx.spawn(async (cx) => {
       const failed = await addAccount(name);
       this.busy = null;
-      if (failed) notify({ title: "The account was not added", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The account was not added", body: failed, level: "error" });
       else {
         this.adding = false;
         this.nameInput.set_value("");
@@ -180,7 +180,7 @@ export default class Accounts {
     if (!a || a.kind !== "claude" || !this.project?.folder || a.id === this.projectAccount) return;
     cx.spawn(async (cx) => {
       const failed = await setProjectAccount(this.project.folder, a.id);
-      if (failed) notify({ title: "The project's account was not saved", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The project's account was not saved", body: failed, level: "error" });
       else {
         this.projectAccount = a.id;
         // The chat in front: at home on it now, or borrowing the one it runs on.
@@ -206,7 +206,7 @@ export default class Accounts {
     if (!id) return;
     cx.spawn(async (cx) => {
       const failed = await renameAccount(id, this.renameInput.value());
-      if (failed) notify({ title: "The name was not changed", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The name was not changed", body: failed, level: "error" });
       else {
         this.renaming = null;
         this.handle.focus();
@@ -225,7 +225,10 @@ export default class Accounts {
     if (account.id === this.using) return;
     const claudeToClaude = account.kind === "claude" && from.program?.key?.includes("claude");
     let way = claudeToClaude ? how ?? (this.mode === "ask" ? null : this.mode) : "new_pane";
-    // Keep running can't here (or onto a hub account): ask instead, with why.
+    // Keep running moves every chat on this chat's folder: when others share
+    // it, only RESTART moves just this one. It can't at all here (or onto a
+    // hub account): ask instead, with why.
+    if (way === "keep" && keepMovesOthers(this.keep, account)) way = "restart";
     if (way === "keep" && (this.keep?.why || isStation(account))) way = null;
     if (!way) {
       this.choosing = this.choosing === account.id ? null : account.id;
@@ -241,9 +244,9 @@ export default class Accounts {
       setShared("orcha.fuelRev", Date.now());
       // The switch cleared the account's cached fuel: read it again for FUEL.
       if (!failed) refreshFuel().then(() => setShared("orcha.fuelRev", Date.now()));
-      if (failed) notify({ title: "The chat did not move", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The chat did not move", body: failed, level: "error" });
       else {
-        const moved = this.keep?.others ? `This chat and ${this.keep.others} more on the same folder` : "This chat";
+        const moved = way === "keep" && this.keep?.others ? `This chat and ${this.keep.others} more on the same folder` : "This chat";
         const back = way === "keep" && account.id === this.home;
         const body = back ? `${moved} ${this.keep?.others ? "are" : "is"} back on ${this.keep?.others ? "their" : "its"} own account: nothing borrowed. Claude picks it up within half a minute.` : way === "keep" ? `${moved} keep${this.keep?.others ? "" : "s"} running, borrowing its sign-in (FUEL says BORROWED). Claude picks it up within half a minute. RETURN in ACCOUNTS ends the borrow.` : way === "restart" ? "Only this chat: same pane, restarted on the account." : "A new agent opens beside the old one and sums up first.";
         notify({ title: back ? `The chat is back on ${account.label ?? account.id}` : `The chat moves to ${account.label ?? account.id}`, body, level: "success", timeout: 6000 });
@@ -258,7 +261,7 @@ export default class Accounts {
   withoutAgent(account, cx) {
     cx.spawn(async () => {
       const failed = await startOn(account);
-      if (failed) notify({ title: "The chat did not start", body: failed, level: "error" });
+      if (failed) notifyError({ title: "The chat did not start", body: failed, level: "error" });
       else this.close();
     });
   }
@@ -299,20 +302,23 @@ export default class Accounts {
           : isHome
             ? button(k, `switch-${a.id}`, `RETURN${enter}`, (_e, cx) => this.switchTo(a, this.keep?.why ? null : "keep", cx), { primary: true, small: true })
             : button(k, `switch-${a.id}`, `SWITCH${enter}`, (_e, cx) => this.switchTo(a, null, cx), { primary: isBest, small: true });
+    // Keep running onto another account only for a chat alone on its folder.
+    const noKeep = Boolean(this.keep?.why) || isStation(a) || keepMovesOthers(this.keep, a);
     const choices = this.choosing === a.id
       ? h_flex()
           .gap(6)
           .pt(4)
           .items_center()
           .child(div().text_size(11.5).text_color(k.muted).child("Move this chat:"))
-          .when(!this.keep?.why && !isStation(a), (el) => el.child(button(k, `keep-${a.id}`, this.keep?.others ? `KEEP RUNNING · ${this.keep.others + 1} CHATS` : "KEEP RUNNING", (_e, cx) => this.switchTo(a, "keep", cx), { small: true, primary: true })))
-          .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: Boolean(this.keep?.why) || isStation(a) }))
+          .when(!noKeep, (el) => el.child(button(k, `keep-${a.id}`, this.keep?.others ? `KEEP RUNNING · ${this.keep.others + 1} CHATS` : "KEEP RUNNING", (_e, cx) => this.switchTo(a, "keep", cx), { small: true, primary: true })))
+          .child(button(k, `restart-${a.id}`, "RESTART", (_e, cx) => this.switchTo(a, "restart", cx), { small: true, primary: noKeep }))
           .child(button(k, `pane-${a.id}`, "NEW PANE", (_e, cx) => this.switchTo(a, "new_pane", cx), { small: true }))
       : null;
     // What each way does, in a line: nobody should have to try one to find out.
     const keepLine = isStation(a) ? "No keep running on a hub account: its token lives only in claude's env."
       : this.keep?.why ? `No keep running: ${this.keep.why}`
-      : this.keep?.others ? `Keep running: no restart, the ${this.keep.others + 1} chats on this folder move together, borrowing the account.`
+      : keepMovesOthers(this.keep, a) ? `No keep running: ${this.keep.others} other chat${this.keep.others === 1 ? " shares" : "s share"} this chat's folder and would move too.`
+      : this.keep?.others ? `Keep running: no restart, the ${this.keep.others + 1} chats on this folder go back together.`
       : "Keep running: no restart, the chat borrows the account within half a minute.";
     const keepNote = this.choosing !== a.id ? null
       : v_flex()
@@ -403,7 +409,7 @@ export default class Accounts {
       cx.spawn(async (cx) => {
         const failed = await moveToKeychain();
         this.busy = null;
-        if (failed) notify({ title: "The sign-in stayed in the file", body: failed, level: "error" });
+        if (failed) notifyError({ title: "The sign-in stayed in the file", body: failed, level: "error" });
         else notify({ title: "The sign-in is in the Keychain", body: "Switching works again.", level: "success", timeout: 5000 });
         this.load(cx);
       });

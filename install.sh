@@ -21,7 +21,13 @@ case "$(uname -s)" in
 esac
 
 REPO="trungkien1208/orcherd"
-src=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
+# From a clone only when this file was run by name: piped from curl, $0 is
+# just "sh", and the folder it was run in (Herdr's own config folder, say)
+# must not be taken for a copy of orcha.
+src=
+case "$0" in
+  install.sh | */install.sh) src=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true) ;;
+esac
 fetched=
 cleanup_fetch() { [ -z "$fetched" ] || rm -rf "$fetched"; }
 trap cleanup_fetch EXIT
@@ -108,7 +114,14 @@ echo "Orcherd installed into $dest."
 # Herdr reloads mods live, but a whole install at once is more than it
 # picks up cleanly (and it refuses reloads after many in one run): an open
 # Herdr restarts once. Its agents keep running.
-if pgrep -f "Herdr.app/Contents/MacOS/Herdr" >/dev/null 2>&1 || pgrep -x herdr-app >/dev/null 2>&1; then
+if [ -n "${ORCHA_REF:-}" ] && [ ! -t 1 ] && pgrep -f "Herdr.app/Contents/MacOS/Herdr" >/dev/null 2>&1; then
+  # Updated from inside the app (Settings › orcha, the header's pill): this
+  # output goes nowhere, and the app keeps running the old copy until it
+  # restarts. A macOS dialog asks, after this script has ended.
+  ver=$(sed -n 's/^export const VERSION = "\(.*\)";$/\1/p' "$dest/mods/orcha/version.js" 2>/dev/null)
+  nohup /bin/sh "$dest/mods/orcha/bin/restart-herdr.sh" ask "$ver" </dev/null >/dev/null 2>&1 &
+  echo "Restart Herdr to load it."
+elif pgrep -f "Herdr.app/Contents/MacOS/Herdr" >/dev/null 2>&1 || pgrep -x herdr-app >/dev/null 2>&1; then
   echo ""
   echo "  >>> Restart Herdr now: quit it (Cmd+Q) and open it again. <<<"
   echo "  So every part of Orcherd loads fresh. Your agents keep running."

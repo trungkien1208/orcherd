@@ -9,8 +9,15 @@ nothing of the terminal orcha, and keeps its files apart from it.
   accounts.py activate <id>         make that Claude account the one every default Claude uses
   accounts.py link <id>             link ~/.claude's shared files into a Claude account's folder
   accounts.py login <id>            sign that account in (its own folder, email filled in)
+  accounts.py remove <id>           take an account off this Mac: config.json, its sign-ins, its fuel
+  accounts.py free <id>             give back folders lent to/from that account whose chat is gone
+  accounts.py seat <id>             give the Claude account of ~/.claude a folder of its own, so it can
+                                    start while another account is in the main folder (prints the folder)
   accounts.py keychain              whether Claude's sign-ins can go in the Keychain (JSON)
   accounts.py keychain-move         put sign-ins Claude left in .credentials.json into the Keychain
+  accounts.py doctor                what switching accounts needs on this Mac, and what is missing (JSON)
+  accounts.py diagnose [ver] [herdr]  write ~/.cache/orcherd/diagnostics.md for an AI agent (prints its path)
+  accounts.py log <where> <text>    add a line to ~/.cache/orcherd/errors.log (the app's own failures)
 
 Files: ~/.config/orcherd (config.json with `accounts`, which account is where)
 and ~/.cache/orcherd/limits (the fuel), the same folders as paths.js. Claude,
@@ -408,20 +415,32 @@ def active_claude():
 
 
 def claude_profile(acct):
-    """An account's oauthAccount (its email etc.) as last seen."""
-    try:
-        with open(os.path.join(PROFILE_DIR, acct + ".json")) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        pass
-    d = claude_dir(ACCOUNTS[acct])
-    if d:
+    """An account's oauthAccount (its email etc.) as last seen. An account with
+    a folder of its own: what Claude wrote in that folder, which a new sign-in
+    there updates, unless another account was switched into the folder (then
+    it shows that one: only the profile kept for the account is taken). Else
+    the profile kept when it last left the default sign-in."""
+    def kept():
+        try:
+            with open(os.path.join(PROFILE_DIR, acct + ".json")) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    def folder(d):
         try:
             with open(os.path.join(d, ".claude.json")) as fh:
                 return json.load(fh).get("oauthAccount")
         except (OSError, ValueError, AttributeError):
-            pass
-    return None
+            return None
+
+    cfg = ACCOUNTS[acct]
+    d = claude_dir(cfg)
+    if not d:
+        return kept()
+    if read_slots().get(own_service(cfg), acct) != acct:
+        return kept()
+    return folder(d) or kept()
 
 
 # A pane started in an account's own folder (CLAUDE_CONFIG_DIR) reads that
@@ -501,26 +520,65 @@ def nudge_claude(config_dir):
             os.utime(path, None)
 
 
+def refresh_of(raw):
+    """The refresh token of a sign-in, or None: which copies are one sign-in."""
+    try:
+        return json.loads(raw)["claudeAiOauth"].get("refreshToken") or None
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None
+
+
+# Claude replaces the refresh token on every refresh and the old one is
+# refused from then on (invalid_grant). It locks a refresh within one config
+# folder, not across folders: two folders holding copies of one sign-in, with
+# the same expiry, both refresh at once and one is signed out. So a copy
+# Orcherd writes for another folder says it runs out earlier, each by its own
+# step: Claude refreshes one copy first, and sync_claude hands the new
+# sign-in to the others before their turn. Only the expiry Claude reads is
+# moved: the access token is good to its real end either way.
+STAGGER_MS = 15 * 60 * 1000
+
+
+def staggered(raw, step=1):
+    """`raw` saying it runs out `step` stagger steps earlier."""
+    try:
+        data = json.loads(raw)
+        o = data["claudeAiOauth"]
+        if isinstance(o.get("expiresAt"), (int, float)):
+            o["expiresAt"] = int(o["expiresAt"]) - STAGGER_MS * max(1, step)
+        return json.dumps(data, separators=(",", ":"))
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return raw
+
+
 def sync_claude(acct):
-    """Claude replaces the refresh token on every refresh, so a copy of a
-    sign-in left behind stops working: the freshest one goes to the copy
-    Orcherd kept and to items whose sign-in has run out, and the Claudes
-    reading them are nudged. An item still in date is left alone: it may be
-    a sign-in of its own, and two folders sharing one would fight over it."""
+    """The account's sign-in may be copied into several Keychain items (the
+    default one while it is active, folders it was kept running in, its own
+    folder, the copy Orcherd kept). When one was refreshed, the others hold a
+    refresh token Claude no longer takes: the freshest goes to each of them
+    at once, still in date or not, staggered (see STAGGER_MS), and the
+    Claudes reading them are nudged."""
     src, raw = freshest(acct)
     if not src:
         return
-    exp = expires_of(raw)
-    now = time.time() * 1000
+    exp, token = expires_of(raw), refresh_of(raw)
     folders = {dir_service(claude_dir(c)): claude_dir(c)
                for c in ACCOUNTS.values() if c["kind"] == "claude" and claude_dir(c)}
+    step = 0
     for svc in holders(acct):
+        if svc == src:
+            continue
         old, cur = kc_oauth(svc)
-        if svc == src or cur == raw or old >= exp:
-            continue
-        if svc != kept_service(acct) and old > now:
-            continue
-        kc_write(svc, kc_account(svc), raw)
+        kept = svc == kept_service(acct)
+        if not kept:
+            step += 1  # each copy its own step: no two run out together
+        want = raw if kept else staggered(raw, step)
+        if cur and refresh_of(cur) == token:
+            if old == expires_of(want):
+                continue  # the same sign-in, already where it should be
+        elif cur and old >= exp:
+            continue  # a fresher sign-in of its own
+        kc_write(svc, kc_account(svc), want)
         if svc == DEFAULT_SERVICE:
             nudge_claude(None)
         elif svc in folders:
@@ -773,6 +831,8 @@ def cmd_json(fresh=False):
             get(acct, fresh)
         except (OSError, ValueError):
             pass
+    with contextlib.suppress(OSError, ValueError, KeyError):
+        sync_emails()
 
 
 def dir_account(found_raw):
@@ -861,7 +921,7 @@ def cmd_activate(acct):
         if profile:
             make_dir(PROFILE_DIR)
             atomic_write(os.path.join(PROFILE_DIR, current + ".json"), json.dumps(profile))
-    kc_write(DEFAULT_SERVICE, account_attr, source)
+    kc_write(DEFAULT_SERVICE, account_attr, staggered(source))
     set_default_profile(acct)
     write_line(ACTIVE_FILE, acct)
     expire_fuel(acct)
@@ -890,9 +950,10 @@ def switch_claude_dir(acct, d):
         # keep the sign-in being replaced (maybe refreshed since): for its
         # account, or aside when no account owns it
         kc_write(kept_service(owner) if owner else unowned_service(service), account_attr, live)
-    kc_write(service, account_attr, source)
-    slots = read_slots()
     native = next((a for a in claude_accounts() if own_service(ACCOUNTS[a]) == service), None)
+    # back in its own folder it is the sign-in itself; anywhere else a copy
+    kc_write(service, account_attr, source if acct == native else staggered(source))
+    slots = read_slots()
     if acct == native:
         slots.pop(service, None)
     else:
@@ -941,10 +1002,10 @@ def publish_sign_in(acct):
     if not kc_read(own_service(ACCOUNTS[acct])):
         return
     sync_claude(acct)  # the new sign-in is the freshest: it reaches every copy
+    # who signed in may be someone new: forget the profile kept for the account
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(PROFILE_DIR, acct + ".json"))
     if acct == active_claude():
-        # who signed in may be someone new: forget the profile kept for the account
-        with contextlib.suppress(OSError):
-            os.remove(os.path.join(PROFILE_DIR, acct + ".json"))
         set_default_profile(acct)
 
 
@@ -962,7 +1023,9 @@ def email(acct):
     cfg = ACCOUNTS[acct]
     try:
         if cfg["kind"] == "claude":
-            if acct == active_claude():
+            # its own folder says who signed in there; ~/.claude.json only
+            # for the account that lives in the main folder
+            if acct == active_claude() and not claude_dir(cfg):
                 return claude_email() or None
             return (claude_profile(acct) or {}).get("emailAddress")
         if cfg["kind"] == "cursor":
@@ -977,6 +1040,221 @@ def email(acct):
         return None
 
 
+def save_emails(found):
+    """Writes the signed-in emails ({account: email}) into config.json, where
+    the app and the hub's fuel read them. Only the ones that changed; an email
+    that can't be read now keeps the one written before."""
+    cfg, before = load_config()
+    if cfg is None:
+        return
+    changed = False
+    for a in cfg["accounts"]:
+        e = found.get(a.get("id")) if isinstance(a, dict) else None
+        if e and a.get("email") != e:
+            a["email"] = e
+            changed = True
+    if changed:
+        with contextlib.suppress(OSError):
+            save_config(cfg, before)
+        for a in cfg["accounts"]:
+            if isinstance(a, dict) and a.get("id") in ACCOUNTS:
+                ACCOUNTS[a["id"]]["email"] = a.get("email", "")
+
+
+def sync_emails():
+    found = {}
+    for acct in ACCOUNTS:
+        e = email(acct)
+        if e:
+            found[acct] = str(e).strip()
+    save_emails(found)
+
+
+def same_claude(acct, e):
+    """The other Claude accounts signed in as email `e`: one Claude account,
+    one fuel, however many names it has here."""
+    e = (e or "").strip().lower()
+    if not e:
+        return []
+    return [a for a in claude_accounts()
+            if a != acct and str(email(a) or ACCOUNTS[a].get("email") or "").strip().lower() == e]
+
+
+def label_of(acct):
+    return str(ACCOUNTS[acct].get("label") or acct).replace("\x1b", "")
+
+
+DEFAULT_FILE = os.path.join(CONFIG_DIR, "claude-default")
+PROJECTS_FILE = os.path.join(CONFIG_DIR, "project-accounts.json")
+OWN_FOLDERS = os.path.join(CONFIG_DIR, "claude")
+
+
+def remove_folder(d):
+    """An account's own folder under ~/.config/orcherd/claude: the links to
+    ~/.claude's files go (never what they point at), then the folder. A
+    folder that keeps chats of its own (a real `projects`, not the link) is
+    kept, only its sign-in files go. Nothing outside OWN_FOLDERS is touched.
+    The folder, when kept, or None."""
+    real = os.path.realpath(d)
+    if not real.startswith(os.path.realpath(OWN_FOLDERS) + os.sep) or not os.path.isdir(real):
+        return None
+    for name in os.listdir(real):
+        p = os.path.join(real, name)
+        if os.path.islink(p):
+            os.unlink(p)
+    for name in (".claude.json", ".credentials.json"):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(real, name))
+    if os.path.isdir(os.path.join(real, "projects")):
+        return real
+    shutil.rmtree(real)  # never follows a link: there are none left at the top anyway
+    return None
+
+
+def cmd_remove(acct):
+    """Takes an account off this Mac: out of config.json, its Keychain items
+    (the copy Orcherd kept, its own folder's), its kept profile, its fuel, the
+    projects that started on it, its folder. Never the default sign-in, and
+    never an account chats run on through another folder. Prints what stays."""
+    cfg = ACCOUNTS[acct]
+    name = label_of(acct)
+    if cfg["kind"] == "claude":
+        free_folders(acct)
+        if acct == active_claude():
+            raise RuntimeError(f"The main folder's chats (~/.claude) run on {name} now. "
+                               "RETURN them first (Settings › Accounts, on the default account), "
+                               "or make another account the default.")
+        if (read_text(DEFAULT_FILE) or "").strip() == acct:
+            raise RuntimeError(f"{name} is the default account. Make another account the default first.")
+        slots = read_slots()
+        own = own_service(cfg) if claude_dir(cfg) else None
+        if any(a == acct and svc != own for svc, a in slots.items()):
+            raise RuntimeError(f"A chat in another folder was kept running on {name}. RETURN it first (ACCOUNTS).")
+        if own and slots.get(own, acct) != acct:
+            raise RuntimeError(f"{name}'s folder is lent to another account now. RETURN that chat first (ACCOUNTS).")
+    config, before = load_config()
+    if config is None:
+        raise RuntimeError("Orcherd's config.json could not be read: nothing was removed.")
+    config["accounts"] = [a for a in config["accounts"] if not (isinstance(a, dict) and a.get("id") == acct)]
+    if not save_config(config, before):
+        raise RuntimeError("config.json changed meanwhile. Try again.")
+    kept = None
+    if cfg["kind"] == "claude":
+        d = claude_dir(cfg)
+        for svc in [kept_service(acct)] + ([own_service(cfg)] if d else []):
+            if svc == DEFAULT_SERVICE:
+                continue
+            for _ in range(5):  # one item per call; Claude may have left more than one
+                r = subprocess.run(["security", "delete-generic-password", "-s", svc],
+                                   capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    break
+            _KC_READ.pop(svc, None)
+        slots = read_slots()
+        if d and own_service(cfg) in slots:
+            slots.pop(own_service(cfg))
+            write_slots(slots)
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(PROFILE_DIR, acct + ".json"))
+        if d:
+            try:
+                kept = remove_folder(d)
+            except OSError:
+                kept = os.path.expanduser(d)
+    for suffix in (".json", ".token.json", ".json.retry", ".json.lock"):
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(CACHE_DIR, acct + suffix))
+    if (read_text(SELECTED_FILE) or "").strip() == acct:
+        write_line(SELECTED_FILE, None)
+    try:
+        projects = json.loads(read_text(PROJECTS_FILE) or "{}")
+        if isinstance(projects, dict) and acct in projects.values():
+            atomic_write(PROJECTS_FILE, json.dumps({k: v for k, v in projects.items() if v != acct}, indent=2) + "\n")
+    except (OSError, ValueError):
+        pass
+    if kept:
+        print(f"Kept {kept.replace(HOME, '~')}: it holds chats of its own.")
+
+
+def folder_in_use(d):
+    """Whether a Claude (any process with CLAUDE_CONFIG_DIR=d) runs now."""
+    d = os.path.expanduser(d)
+    r = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "command="], capture_output=True, text=True, timeout=10)
+    return r.returncode != 0 or re.search(rf"(^|\s)CLAUDE_CONFIG_DIR={re.escape(d)}(\s|$)", r.stdout) is not None
+
+
+def free_folders(acct):
+    """Folders lent away (keep running) whose chat is gone: back to their own
+    account, nothing running loses its sign-in. `acct`: its own folder, and
+    folders lent to it. True when one was given back."""
+    slots = read_slots()
+    native = {own_service(c): a for a, c in ACCOUNTS.items() if c["kind"] == "claude" and claude_dir(c)}
+    done = False
+    for svc, holder in list(slots.items()):
+        owner = native.get(svc)
+        if not owner or holder == owner or acct not in (owner, holder):
+            continue
+        d = claude_dir(ACCOUNTS[owner])
+        if not folder_in_use(d):
+            switch_claude_dir(owner, d)
+            done = True
+    return done
+
+
+def cmd_seat(acct):
+    """The account that lives in ~/.claude (no folder of its own) can run only
+    while the main folder holds it. When another account is there, it gets a
+    folder of its own, as an added account has: ~/.claude's files linked in,
+    its sign-in in that folder's Keychain item, Claude's first-run screens
+    marked seen. It is an ordinary account from then on. Prints the folder."""
+    cfg = ACCOUNTS[acct]
+    if cfg["kind"] != "claude":
+        sys.exit("seat: not a Claude account")
+    if claude_dir(cfg):
+        print(cfg["dir"])
+        return
+    if acct == active_claude():
+        sys.exit(f"{label_of(acct)} is in the main folder now: it needs no folder of its own.")
+    raw = freshest(acct)[1]
+    if not raw:
+        sys.exit(T["err_signin"])
+    profile = claude_profile(acct)
+    base = re.sub(r"^claude-", "", acct) or "main"
+    slug, n = base, 1
+    while os.path.lexists(os.path.join(OWN_FOLDERS, slug)):
+        n += 1
+        slug = f"{base}-{n}"
+    shown = f"~/.config/orcherd/claude/{slug}"
+    d = os.path.expanduser(shown)
+    config, before = load_config()
+    if config is None:
+        raise RuntimeError("Orcherd's config.json could not be read.")
+    entry = next((a for a in config["accounts"] if isinstance(a, dict) and a.get("id") == acct), None)
+    if entry is None:
+        raise RuntimeError("That account is not in config.json any more.")
+    link_shared(d)
+    # ~/.claude.json as it is (MCP servers, trusted projects, settings seen),
+    # with this account's profile: the same Claude, only the sign-in moved
+    state = {}
+    with contextlib.suppress(OSError, ValueError):
+        with open(os.path.join(HOME, ".claude.json")) as fh:
+            state = json.load(fh)
+    if not isinstance(state, dict):
+        state = {}
+    state["hasCompletedOnboarding"] = True
+    if profile:
+        state["oauthAccount"] = profile
+    else:
+        state.pop("oauthAccount", None)
+    atomic_write(os.path.join(d, ".claude.json"), json.dumps(state, indent=2))
+    kc_write(dir_service(d), kc_account(DEFAULT_SERVICE), raw)
+    entry["dir"] = shown
+    if not save_config(config, before):
+        raise RuntimeError("config.json changed meanwhile. Try again.")
+    cfg["dir"] = shown
+    print(shown)
+
+
 def cmd_login(acct):
     """Sign this account in, in its own folder, with its email filled in. A
     sign-in that doesn't finish (cancelled, the pane closed) puts back which
@@ -986,7 +1264,16 @@ def cmd_login(acct):
     shown = str(cfg.get("email") or "").replace("\x1b", "")
     who = f"  →  {shown}" if shown else ""
     print(f"\033[1m  Sign in {label.replace(chr(27), '')}{who}\033[0m")
-    print("\033[2m  Your browser opens. Pick the email above.\033[0m\n")
+    taken = [(a, email(a)) for a in claude_accounts() if a != acct] if cfg["kind"] == "claude" else []
+    taken = [(a, e) for a, e in taken if e]
+    if taken and not shown:
+        print("\033[2m  Already signed in here:\033[0m")
+        for a, e in taken:
+            print(f"\033[2m    {str(e).replace(chr(27), '')}  ({label_of(a)})\033[0m")
+        print("\033[33m  Your browser signs in whichever claude.ai account it has open. If that is one\n"
+              "  of these, sign out of claude.ai first, or open the link in a private window.\033[0m")
+    print("\033[2m  Your browser opens. Pick the email above.\033[0m\n" if shown
+          else "\033[2m  Your browser opens.\033[0m\n")
     done = None
     before = None
     # closing the pane ends the sign-in: undo, as for any other unfinished one
@@ -1028,13 +1315,276 @@ def cmd_login(acct):
     forget_fuel(acct)
     e = email(acct)
     print(f"\n  {label} ({e or 'not signed in'})")
+    if e:
+        save_emails({acct: str(e).strip()})
+    twins = same_claude(acct, e) if cfg["kind"] == "claude" and done is not None and done.returncode == 0 else []
+    if twins:
+        names = ", ".join(label_of(a) for a in twins)
+        print(f"\n\033[33m  {str(e).replace(chr(27), '')} is already signed in here as {names}: one Claude\n"
+              f"  account, one fuel, so {label} adds nothing. The browser likely signed in\n"
+              f"  the claude.ai account it had open.\033[0m")
+        try:
+            answer = input("\033[2m\n  r + Enter removes this account, Enter keeps it. \033[0m").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer == "r":
+            try:
+                with state_lock():
+                    cmd_remove(acct)
+                print(f"  {label} removed. Sign out of claude.ai in the browser, then add it again.")
+            except (RuntimeError, OSError, subprocess.SubprocessError) as err:
+                print(f"  Not removed: {err}")
     try:
         input("\033[2m\n  Enter closes this pane. \033[0m")
     except (EOFError, KeyboardInterrupt):
         pass
 
 
-MUTATING = ("switch-dir", "activate", "keychain-move")
+# ---------- what switching accounts needs, and a report an AI agent can read
+# `doctor` checks what moving chats between Claude accounts needs on this Mac
+# and says how to fix what is missing; `diagnose` writes all of it, with the
+# recent errors, into one file to hand to an agent. Neither ever reads a
+# secret out: a Keychain item is only tried, its value thrown away.
+
+ERRORS_LOG = os.path.join(CACHE, "errors.log")
+DIAGNOSTICS_FILE = os.path.join(CACHE, "diagnostics.md")
+
+
+def log_error(where, message, trace=None):
+    """A line (and a traceback, if any) into ~/.cache/orcherd/errors.log, for
+    `diagnose`. What went wrong only, never data. Kept under ~200 KB."""
+    with contextlib.suppress(OSError):
+        make_dir(CACHE)
+        with contextlib.suppress(OSError):
+            if os.path.getsize(ERRORS_LOG) > 200_000:
+                with open(ERRORS_LOG, errors="replace") as fh:
+                    atomic_write(ERRORS_LOG, fh.read()[-100_000:])
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = " ".join(str(message).split())[:2000]
+        with open(os.open(ERRORS_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as fh:
+            fh.write(f"{stamp} [{where}] {line}\n" + (trace or ""))
+
+
+def keychain_access(service):
+    """(state, why) of reading item `service` the way switching does: ok,
+    missing (no such item), asking (macOS shows a dialog, unanswered) or
+    denied. Only reading it tells; the value is thrown away."""
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
+                           capture_output=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return "asking", None
+    if r.returncode == 0:
+        return "ok", None
+    if r.returncode == 44:  # errSecItemNotFound
+        return "missing", None
+    why = (r.stderr.decode(errors="replace").strip().splitlines() or [f"exit {r.returncode}"])[-1]
+    return "denied", why
+
+
+def doctor_checks():
+    """[{id, ok, title, detail, fix}]: ok True (fine), False (switching fails
+    until fixed) or None (works, but worth knowing). fix: what the app offers
+    (unlock, keychain-access, move, sign-in, add, install-claude), or None."""
+    out = []
+
+    def check(id_, ok, title, detail="", fix=None):
+        out.append({"id": id_, "ok": ok, "title": title, "detail": detail, "fix": fix})
+
+    claude = agent_path("claude")
+    check("claude-cli", bool(claude),
+          "Claude Code is installed" if claude else "Claude Code is not installed",
+          claude or "Install it: curl -fsSL https://claude.ai/install.sh | bash, then press Check again.",
+          None if claude else "install-claude")
+
+    kc = keychain_state()
+    state = kc["state"]
+    if state == "ok":
+        check("keychain", True, "The macOS Keychain can be written",
+              "Switching writes the sign-in there.")
+    elif state == "file-only":
+        n = len(kc["files"])
+        check("keychain", False, "Claude keeps a sign-in in a file, not the Keychain",
+              f"{n} .credentials.json file{'s' if n != 1 else ''}: a running chat would not see a switch. "
+              "Move to Keychain puts them in and deletes the files.", "move")
+    elif state == "locked":
+        check("keychain", False, "The macOS Keychain is locked",
+              f"{kc['why'] or ''}. Unlock it with your Mac's password.".lstrip(". "), "unlock")
+    else:
+        check("keychain", False, "The macOS Keychain can't be written",
+              f"{kc['why'] or 'security failed'}. Usually the Mac's password changed and the login keychain "
+              "kept the old one: Keychain Access › Settings › Reset Default Keychain, then sign in again.",
+              "keychain-access")
+
+    # Items Claude made: macOS may ask before `security` reads them.
+    services = [DEFAULT_SERVICE]
+    for a in claude_accounts():
+        services += [own_service(ACCOUNTS[a]), kept_service(a)]
+    asking, denied = [], []
+    if state in ("ok", "file-only"):
+        for svc in dict.fromkeys(services):
+            got, why = keychain_access(svc)
+            if got == "asking":
+                asking.append(svc)
+                break  # one dialog at a time: answer it, then check again
+            if got == "denied":
+                denied.append(f"{svc} ({why})")
+    if asking:
+        check("keychain-access", False, "macOS is asking before Orcherd may read a sign-in",
+              f"A dialog asks for \"{asking[0]}\". Type your Mac's password and click Always Allow "
+              "(not Allow: that asks again at every switch), then press Check again.")
+    elif denied:
+        check("keychain-access", False, "macOS refuses Orcherd a sign-in in the Keychain",
+              f"{'; '.join(denied)}. In Keychain Access find that item › Access Control, allow "
+              "/usr/bin/security (or delete the item and sign that account in again).", "keychain-access")
+    elif state in ("ok", "file-only"):
+        check("keychain-access", True, "Orcherd may read Claude's sign-ins without asking")
+
+    locals_ = claude_accounts()
+    if len(locals_) < 2:
+        check("accounts", None, "Only one Claude account here",
+              "Add a second one below to move chats between them when one runs dry.", "add")
+    else:
+        check("accounts", True, f"{len(locals_)} Claude accounts here")
+
+    missing = []
+    for a in locals_:
+        with contextlib.suppress(Exception):
+            if not freshest(a)[1] and not cred_file_read(own_service(ACCOUNTS[a])):
+                missing.append(label_of(a))
+    if missing:
+        check("signed-in", False, f"Not signed in: {', '.join(missing)}",
+              "SIGN IN on each of them (here or in ACCOUNTS). A browser opens: pick the right claude.ai account.",
+              "sign-in")
+    elif locals_:
+        check("signed-in", True, "Every Claude account is signed in")
+
+    seen, twins = {}, []
+    for a in locals_:
+        e = str(email(a) or ACCOUNTS[a].get("email") or "").strip().lower()
+        if e and e in seen:
+            twins.append(f"{seen[e]} and {label_of(a)}")
+        elif e:
+            seen[e] = label_of(a)
+    if twins:
+        check("twins", False, "Two names for one Claude account",
+              f"{'; '.join(twins)} signed in as the same email: one fuel. Remove one, sign out of claude.ai "
+              "in the browser (or use a private window), then add it again.")
+    return out
+
+
+def masked(e):
+    """a***@example.com: enough to tell accounts apart in a shared report."""
+    e = str(e or "")
+    if "@" not in e:
+        return e and "***"
+    name, _, domain = e.partition("@")
+    return f"{name[:1]}***@{domain}"
+
+
+def run_out(cmd, timeout=10):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or r.stderr).strip().splitlines()[0] if (r.stdout or r.stderr).strip() else f"exit {r.returncode}"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"unavailable ({type(e).__name__})"
+
+
+def cmd_diagnose(orcha_version="?", herdr_version="?"):
+    """Writes ~/.cache/orcherd/diagnostics.md (only you can read it) and
+    prints its path: versions, the checks, the accounts (emails masked, no
+    token), which Keychain items exist, Orcherd's state files and the recent
+    errors. Made to be read by an AI agent asked to fix Orcherd."""
+    checks = doctor_checks()
+    mark = {True: "✅", False: "❌", None: "⚠️"}
+    claude = agent_path("claude")
+    lines = [
+        "# Orcherd diagnostics",
+        "",
+        f"Written {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. No tokens or secrets are in this file; "
+        "emails are masked.",
+        "",
+        "## For the AI agent reading this",
+        "",
+        "The user runs Orcherd (orcha for the Herdr app) and something is wrong, most likely with switching "
+        "Claude accounts. Find the cause from what follows and fix it with the user.",
+        "",
+        f"- Orcherd's code on this Mac: `{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}` "
+        "(`bin/accounts.py` does accounts, fuel and the Keychain; `accounts-data.js` calls it). Source: "
+        "https://github.com/trungkien1208/orcherd",
+        "- Its files: `~/.config/orcherd` (config.json: the accounts; claude-active, claude-default, "
+        "claude-slots.json: which account is where) and `~/.cache/orcherd` (fuel, errors.log).",
+        "- Sign-ins live in the macOS Keychain (`security find-generic-password -s <item>`). Never print a "
+        "sign-in's value (`-w`), paste it anywhere or put it in a command line.",
+        "- Ask the user before deleting a Keychain item, a .credentials.json or anything in ~/.config/orcherd. "
+        "Keychain dialogs need the user: tell them what to click.",
+        "- An old Orcherd fixes many things by itself: update in Settings › orcha, or "
+        "`curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/install.sh | sh`, "
+        "then restart Herdr.",
+        "",
+        "## Versions",
+        "",
+        f"- Orcherd: {orcha_version} (running in Herdr; on disk: {installed_version() or '?'})",
+        f"- Herdr: {herdr_version}",
+        f"- macOS: {run_out(['sw_vers', '-productVersion'])} ({run_out(['uname', '-m'])})",
+        f"- Python: {sys.version.split()[0]} ({sys.executable})",
+        f"- Claude Code: {run_out([claude, '--version']) if claude else 'not found'}"
+        + (f" ({claude})" if claude else ""),
+        f"- default keychain: {run_out(['security', 'default-keychain'])}",
+        "",
+        "## Checks (what switching accounts needs)",
+        "",
+    ]
+    for c in checks:
+        lines.append(f"- {mark[c['ok']]} **{c['title']}**" + (f": {c['detail']}" if c["detail"] else ""))
+    lines += ["", "## Accounts", "", "| id | kind | name | email | folder | default sign-in | sign-in | fuel |",
+              "|---|---|---|---|---|---|---|---|"]
+    active = active_claude()
+    for a, cfg in ACCOUNTS.items():
+        tok = "-"
+        if cfg["kind"] == "claude":
+            with contextlib.suppress(Exception):
+                svc, raw = freshest(a)
+                exp = expires_of(raw) if raw else -1
+                tok = (f"in `{svc}`, " + ("expired" if exp < time.time() * 1000 else "valid")
+                       + (", has refresh" if raw and json.loads(raw)["claudeAiOauth"].get("refreshToken") else ", NO refresh")
+                       ) if raw else "none found"
+        fuel, age = read_cache(os.path.join(CACHE_DIR, a + ".json"))
+        fuel = fuel if isinstance(fuel, dict) else {}
+        note = fuel.get("error") or fuel.get("note") or (f"read {int(age // 60)} min ago" if fuel else "not read yet")
+        lines.append(f"| {a} | {cfg['kind']} | {label_of(a)} | {masked(email(a) or cfg.get('email'))} | "
+                     f"{('own: ' + claude_dir(cfg) if claude_dir(cfg) else '~/.claude') if cfg['kind'] == 'claude' else '-'} | "
+                     f"{'yes' if a == active else ''} | {tok} | {str(note)[:120]} |")
+    lines += ["", "## Keychain items (exist or not; never their value)", ""]
+    items = [DEFAULT_SERVICE] + [s for a in claude_accounts() for s in (own_service(ACCOUNTS[a]), kept_service(a))]
+    for svc in dict.fromkeys(items):
+        r = subprocess.run(["security", "find-generic-password", "-s", svc], capture_output=True, timeout=10)
+        lines.append(f"- `{svc}`: {'exists' if r.returncode == 0 else 'missing' if r.returncode == 44 else f'exit {r.returncode}'}")
+    lines += ["", "## .credentials.json files (Claude's fallback when the Keychain fails)", ""]
+    for svc, path in cred_files().items():
+        lines.append(f"- `{path.replace(HOME, '~')}`: {'PRESENT' if os.path.exists(path) else 'none'}")
+    lines += ["", "## State files", ""]
+    for name in ("claude-active", "claude-default", "claude-slots.json", "project-accounts.json"):
+        text = read_text(os.path.join(CONFIG_DIR, name))
+        lines.append(f"- `{name}`: " + (f"`{' '.join(text.split())[:400]}`" if text else "none"))
+    lines += ["", "## Recent errors (~/.cache/orcherd/errors.log, newest last)", "", "```"]
+    log = read_text(ERRORS_LOG) or "(none)\n"
+    lines += log.splitlines()[-120:]
+    lines += ["```", ""]
+    make_dir(CACHE)
+    # ~ for the home folder: the report may be shared, the user name need not be
+    atomic_write(DIAGNOSTICS_FILE, "\n".join(lines).replace(HOME, "~") + "\n")
+    print(DIAGNOSTICS_FILE)
+
+
+def installed_version():
+    """The VERSION in this copy's version.js (what Herdr loads next)."""
+    text = read_text(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "version.js")) or ""
+    m = re.search(r'export const VERSION = "([^"]+)"', text)
+    return m.group(1) if m else None
+
+
+MUTATING = ("switch-dir", "activate", "keychain-move", "remove", "seat", "free")
 
 
 def main():
@@ -1053,6 +1603,12 @@ def main():
                 cmd_activate(args[1])
             elif cmd == "keychain-move":
                 cmd_keychain_move()
+            elif cmd == "remove":
+                cmd_remove(args[1])
+            elif cmd == "seat":
+                cmd_seat(args[1])
+            elif cmd == "free":
+                free_folders(args[1])
             else:
                 sys.exit(__doc__)
     elif cmd == "link" and len(args) > 1 and args[1] in ACCOUNTS:
@@ -1063,17 +1619,30 @@ def main():
         cmd_login(args[1])
     elif cmd == "keychain":
         print(json.dumps(keychain_state()))
+    elif cmd == "doctor":
+        print(json.dumps(doctor_checks()))
+    elif cmd == "diagnose":
+        cmd_diagnose(*args[1:3])
+    elif cmd == "log" and len(args) > 2:
+        log_error(args[1][:40], " ".join(args[2:]))
     else:
         sys.exit(__doc__)
 
 
 if __name__ == "__main__":
+    # What failed goes to errors.log too, for `diagnose`: the command, never its data.
+    where = "accounts " + (sys.argv[1] if len(sys.argv) > 1 else "")
     try:
         main()
     except RuntimeError as e:
+        log_error(where, e)
         sys.exit(str(e))
     except subprocess.TimeoutExpired:
+        log_error(where, "Keychain timed out (macOS asking to unlock?)")
         sys.exit("macOS is asking to unlock the Keychain: unlock it, then try again.")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as e:
-        # never the data itself: only what kind of thing went wrong
+        # never the data itself: only what kind of thing went wrong, and where
+        import traceback
+        tb = traceback.extract_tb(e.__traceback__)
+        log_error(where, f"{type(e).__name__} at " + " < ".join(f"{f.name}:{f.lineno}" for f in reversed(tb[-6:])))
         sys.exit(f"accounts.py failed ({type(e).__name__}).")

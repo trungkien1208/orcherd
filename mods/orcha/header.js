@@ -15,7 +15,7 @@ import { h_flex } from "gpui-base";
 import { spaces, agents, run, window, openOverlay, nextCommand, focused, panes, setShared } from "herdr";
 import { tokens, chip, raised, icon, pill, closeTab, closePane } from "./ui.js";
 import { browseProject } from "./new.js";
-import { available, checkUpdate, landed } from "./version.js";
+import { available, checkUpdate, landed, restartNeeded } from "./version.js";
 
 // A square icon button with a hard shadow, like the other raised things.
 function square(k, id, name, tip, onClick) {
@@ -92,6 +92,8 @@ export default class Header {
     const needs = list.filter((a) => a.status === "blocked").length;
     const mac = window()?.platform === "macos";
     const next = available();
+    // Installed, but Herdr runs the old copy until it restarts.
+    const waiting = restartNeeded();
     const search = raised(
       k,
       h_flex()
@@ -147,6 +149,19 @@ export default class Header {
                   openSettings("whale");
                 })
                 .child(raised(k, chip(k, `🐋 ${next.latest} IS OUT · UPDATE`, k.pink).h(22).px(8).border(2).border_color(k.line), 2, 5).loop("opacity", { from: 0.7, to: 1, period: 1600 })),
+            ),
+          )
+          .when(!next && Boolean(waiting), (el) =>
+            el.child(
+              div()
+                .id("orcha-restart")
+                .cursor_pointer()
+                .tooltip("Installed. Herdr loads it after a restart.")
+                .on_click((_e, cx) => {
+                  cx.stop_propagation();
+                  openSettings("whale");
+                })
+                .child(raised(k, chip(k, `🐋 ${waiting} · RESTART HERDR`, k.pink).h(22).px(8).border(2).border_color(k.line), 2, 5).loop("opacity", { from: 0.7, to: 1, period: 1600 })),
             ),
           ),
       )

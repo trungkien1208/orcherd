@@ -38,6 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/install.
 
 **Step 5.** There is no step 5. Go ship something. 🫡
 
+**Stuck on an old whale?** 🦴 The pink pill updates you, then asks to restart Herdr. On 0.8.3 or older, clicking it may look like nothing happened: the update did land, Herdr just keeps running the old copy until you restart it (`⌘Q`, open it again). Still no luck, or older than 0.5 (no pill at all)? Run step 2 again, then restart Herdr. Accounts acting up? Settings › Accounts checks what switching needs and hands an AI agent a report to fix it.
+
 ### 🪟 Windows
 
 Bad news, delivered with love: **the whale can't swim here yet.** 🐋🚫

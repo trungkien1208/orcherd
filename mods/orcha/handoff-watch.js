@@ -8,7 +8,7 @@
 
 import { agents, notify } from "herdr";
 import { fuelLeft, agentFacts } from "./ui.js";
-import { readAccounts, readHandoff, keepRunningOn, handOff, restartOn, askForChecklist, focusedAgent, claudeAccountOf, isStation, sameClaude } from "./accounts-data.js";
+import { readAccounts, readHandoff, logFailure, keepRunningOn, keepInfo, keepMovesOthers, handOff, restartOn, askForChecklist, focusedAgent, claudeAccountOf, isStation, sameClaude } from "./accounts-data.js";
 
 // The tighter of an account's limits, and when that window resets.
 function fuel(account) {
@@ -52,8 +52,11 @@ export default class HandoffWatch {
         const between = from && agents().find((a) => a.pane === from.pane)?.status !== "working";
         if (between && once("auto")) {
           // Keep running can't carry a chat onto (or off) a hub account: restart does.
-          const way = h.switch_mode === "new_pane" ? "new_pane" : h.switch_mode === "restart" || isStation(best) || isStation(account) ? "restart" : "keep";
+          // Nor move other chats sharing this one's folder: then only this one restarts.
+          let way = h.switch_mode === "new_pane" ? "new_pane" : h.switch_mode === "restart" || isStation(best) || isStation(account) ? "restart" : "keep";
+          if (way === "keep" && keepMovesOthers(await keepInfo(from), best)) way = "restart";
           const failed = way === "keep" ? await keepRunningOn(best, from) : way === "restart" ? await restartOn(best) : await handOff(best, { checklistFile: h.checklist_file });
+          if (failed) logFailure("auto switch", failed);
           notify(failed ? { title: "orcha could not switch accounts", body: failed, level: "error" } : { title: `${label} is almost empty: moved to ${best.label ?? best.id}`, level: "success", timeout: 8000 });
         }
         return;
