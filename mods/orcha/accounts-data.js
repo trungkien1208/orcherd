@@ -780,7 +780,7 @@ export async function restartOn(account) {
 // Claude Code writes <config folder>/sessions/<pid>.json for each running
 // chat ({ sessionId, cwd }); every account and hub folder links ~/.claude's.
 // The chat in a terminal: { id, cwd }, or null when it can't be told.
-async function paneSession(terminal, folder) {
+export async function paneSession(terminal, folder) {
   let pid;
   try {
     pid = JSON.parse((await hc(["get", "--json", terminal])).stdout).foreground?.pid;

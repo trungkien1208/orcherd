@@ -1,5 +1,6 @@
-// orcha's right panel: FUEL (the plan limits of the account the focused
-// agent uses: Claude, Codex or Cursor), then the
+// orcha's right panel: CREW (the subagents of the Claude in front of you,
+// crew.js), FUEL (the plan limits of the account the focused agent uses:
+// Claude, Codex or Cursor), then the
 // focused folder's BRANCH, CHANGES, HISTORY and WORKTREES. It also runs the
 // low-fuel watch (handoff-watch.js).
 //
@@ -9,7 +10,8 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { focused, panes, spaces, exec, run, readTextFile, home, shared, setShared, openOverlay, notify } from "herdr";
-import { tokens, button, icon, fuelGauge, readable, agentFacts, chip } from "./ui.js";
+import { tokens, button, icon, fuelGauge, readable, agentFacts, chip, modelLabel } from "./ui.js";
+import { crewChat, readCrew, openCrewDetail, clock, activity, modelColor } from "./crew.js";
 import { showSide } from "./sidetabs.js";
 import HandoffWatch from "./handoff-watch.js";
 import { refreshFuel, claudeAccountOf, readAccounts } from "./accounts-data.js";
@@ -93,6 +95,106 @@ export default class Panel {
     cx.timer.every(60000, (cx) => this.refreshFuel(cx));
     this.watch = new HandoffWatch();
     cx.timer.every(60000, (cx) => this.watch.check(cx));
+    // CREW per terminal, { chat, at, agents }: a pane you come back to shows
+    // its last read at once while a new one is under way.
+    this.crews = new Map();
+    this.crewBusy = new Set(); // terminals being read now
+    this.crewOpen = true;
+    cx.timer.every(2000, (cx) => this.readCrew(cx));
+  }
+
+  // The focused Claude's subagents (crew.js). Its chat is looked up again
+  // every 15 s (a /clear or /resume starts another). Read every 2 s, and at
+  // once when the focus moves (render).
+  readCrew(cx) {
+    const f = focused();
+    const terminal = f?.terminal;
+    this.crewFor = terminal;
+    const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : panes().find((p) => p.terminal === terminal);
+    if (!terminal) return;
+    if (!pane?.program?.key?.includes("claude")) {
+      // Claude left this pane: forget what it had.
+      if (this.crews.delete(terminal)) cx.notify();
+      return;
+    }
+    if (this.crewBusy.has(terminal)) return;
+    this.crewBusy.add(terminal);
+    cx.spawn(async (cx) => {
+      try {
+        const known = this.crews.get(terminal);
+        const chat = known && Date.now() - known.at < 15000 ? known.chat : await crewChat(terminal, f.cwd ?? pane.cwd);
+        const agents = chat ? await readCrew(chat) : [];
+        const before = JSON.stringify(known?.agents ?? []);
+        this.crews.set(terminal, { chat, at: known?.chat === chat ? known.at : Date.now(), agents });
+        // A running one's clock moves: draw again each read while one runs.
+        if (agents.some((a) => a.status === "running") || JSON.stringify(agents) !== before) cx.notify();
+      } finally {
+        this.crewBusy.delete(terminal);
+      }
+    });
+  }
+
+  // One block per subagent, its own helpers indented under it: a stripe in
+  // its state's color (PROCESS's), its task, model and clock, then what it
+  // does right now in words. A finished one is a line, until its helpers
+  // finish too and 5 minutes pass. Cost and everything it did are a click
+  // away (crew.js CrewDetail).
+  crewSection(t, crew) {
+    const list = crew?.agents ?? [];
+    const chat = crew?.chat;
+    if (!list.length || !chat) return null;
+    const now = Date.now();
+    const running = list.filter((a) => a.status === "running").length;
+    const title = ["CREW", running && `${running} working`, list.length - running && `${list.length - running} done`].filter(Boolean).join(" · ");
+    const small = (text, color = t.dim) => div().flex_none().text_size(11).text_color(color).child(text);
+    const row = (a) => {
+      const live = a.status === "running";
+      const helper = (a.depth ?? 1) > 1;
+      // Nothing written for a minute: say so (a long command, a stuck one).
+      const quiet = live && a.last ? Math.floor((now - a.last) / 60000) : 0;
+      const { icon, verb, what } = activity(a);
+      const line2 = live
+        ? h_flex()
+            .gap(5)
+            .items_center()
+            .child(div().flex_none().text_size(11).child(quiet ? "⏳" : icon))
+            .child(small(quiet ? `quiet ${quiet}m ·` : verb, quiet ? readable(t, t.yellow) : t.muted).font_bold())
+            .when(Boolean(quiet), (el) => el.child(small(verb, t.muted)))
+            .when(Boolean(what), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(what)))
+        : a.helpers
+          ? small(`🤝 handed off · ${a.helpers} helper${a.helpers === 1 ? "" : "s"} still working`)
+          : null;
+      return h_flex()
+        .id(`crew-${a.id}`)
+        .when(helper, (el) => el.pl(14 * ((a.depth ?? 1) - 1)))
+        .gap(7)
+        .py(2)
+        .rounded(4)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click(() => openCrewDetail(chat, a.id))
+        .child(div().w(3).flex_none().self_stretch().rounded(2).bg(live ? t.yellow : t.green))
+        .child(
+          v_flex()
+            .flex_1()
+            .min_w(0)
+            .gap(1)
+            .child(
+              h_flex()
+                .gap(6)
+                .items_center()
+                .when(helper, (el) => el.child(small("↳")))
+                .when(!live, (el) => el.child(div().flex_none().text_size(11).child("✅")))
+                .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_bold().text_color(live ? t.ink : t.muted).child(a.title))
+                .when(Boolean(a.steps), (el) => el.child(small(`${a.steps?.done}/${a.steps?.total} steps`)))
+                .when(Boolean(a.model), (el) => el.child(small(modelLabel(a.model).split(" ")[0], readable(t, modelColor(t, a.model))).font_bold()))
+                // Helpers start with their parent's clock running: only the top ones show one.
+                .when(!helper && Boolean(a.start), (el) => el.child(small(live ? clock(now - a.start) : `took ${clock((a.last ?? now) - a.start)}`))),
+            )
+            .when(Boolean(line2), (el) => el.child(line2)),
+        );
+    };
+    return this.section(t, "user-round", title, list.map(row), { fold: { open: this.crewOpen, toggle: () => (this.crewOpen = !this.crewOpen) } });
   }
 
   currentFolder() {
@@ -250,6 +352,11 @@ export default class Panel {
     // FUEL follows the agent in front of you, and any switch of account.
     if (this.fuelKeyNow() !== this.fuelKey) this.readFuel(cx);
     const sections = [];
+    // CREW first: what the agent in front of you has running right now.
+    // The focus moved: read the new pane's CREW now, not at the next tick.
+    if (focused()?.terminal !== this.crewFor) this.readCrew(cx);
+    const crew = this.crewSection(t, this.crews.get(focused()?.terminal));
+    if (crew) sections.push(crew);
     if (this.fuel) {
       const rows = [
         h_flex()

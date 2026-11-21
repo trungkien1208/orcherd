@@ -24,6 +24,7 @@ You clicked. Respect. Here's everything nobody reads.
 - 📊 **RAM**: the status bar shows Herdr in all (the window, herdr-core and every agent); hover for the split.
 - 🚂 **PROCESS**: each working agent is a train between THINK, CODE, TEST and DONE. Click one to jump there.
 - ⛽ **FUEL**: what's left on the plan of the agent in front of you: Claude, Codex or Cursor.
+- 👥 **CREW**: the subagents of the Claude in front of you, live, at the top of the right panel: what each one is doing, its model, context and a rough cost. Finished ones stay 5 minutes. Click one for everything it did: its brief, each tool it called, its report. Read from Claude's own files, so it works for every chat and account with no plugin.
 - 🔁 **ACCOUNTS**: add one, sign in, **SWITCH** the chat in front of you (keep running, restart, or a new pane with notes).
 - 📁 **FILES**: the project's files beside INFO, search by name or text, a viewer next to your work. Right-click a file or folder: open it in the editor, its app or Finder, a new tab in a folder, copy its path. Markdown reads as a page (flip to SOURCE any time).
 - 🔎 **FIND**: `⌘O` a file, `⌘⇧F` text in the project, `⌘F` text in the pane, `⌘L` links.
@@ -114,7 +115,7 @@ rs = "editor:zed {path}:$L"
 
 ## Uninstall, and where the installer writes
 
-The installer writes into `~/.config/herdr-app` (or `$HERDR_APP_HOME`): `layouts/orcha.json` and its `orcha.svg` preview, `themes/orcha-*.json`, `mods/orcha/`, orcha's keys in `keys.json` (only for the orcha layout) and the Matcha theme in `settings.json` if you had none. Herdr's own files and yours are left alone. Orcherd keeps its accounts and settings in `~/.config/orcherd`, its fuel cache in `~/.cache/orcherd` and its saved sign-ins in the Keychain (items named `orcherd-…`). None of it is the terminal orcha's, which Orcherd doesn't need.
+The installer writes into `~/.config/herdr-app` (or `$HERDR_APP_HOME`): `layouts/orcha.json` and its `orcha.svg` preview, `themes/orcha-*.json`, `mods/orcha/`, orcha's keys in `keys.json` (only for the orcha layout) and the Matcha theme in `settings.json` if you had none. Herdr's own files and yours are left alone. Orcherd keeps its accounts and settings in `~/.config/orcherd`, its fuel cache and what CREW read of each subagent in `~/.cache/orcherd` and its saved sign-ins in the Keychain (items named `orcherd-…`). None of it is the terminal orcha's, which Orcherd doesn't need.
 
 Quit Herdr first (`⌘Q`): `uninstall.sh` won't run while it's open, because Herdr writes these files as it goes.
 
