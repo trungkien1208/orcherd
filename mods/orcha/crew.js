@@ -11,7 +11,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { exec, home, props, closeOverlay, openOverlay } from "herdr";
 import { paneSession } from "./accounts-data.js";
 import { script } from "./paths.js";
-import { tokens, chip, icon, modelLabel, tokensShort, readable } from "./ui.js";
+import { tokens, chip, icon, modelLabel, tokensShort } from "./ui.js";
 
 const projectDir = (cwd) => `${home()}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, "-")}`;
 const subagents = (chat) => `${projectDir(chat.cwd)}/${chat.id}/subagents`;
@@ -49,27 +49,42 @@ export function openCrewDetail(chat, id) {
   openOverlay({ mod: "orcha", props: { part: "crew", file: `${subagents(chat)}/${id}.jsonl` }, kind: "dialog", width: 620, height: 560, frame: "none" });
 }
 
-// Each kind of subagent its face in CrewDetail's header; any other kind is a robot.
-const FACES = { Explore: "🔍", Plan: "📐", "general-purpose": "🛠️", fork: "🍴", "claude-code-guide": "📘", "statusline-setup": "⚙️" };
-const faceOf = (type) => FACES[type] ?? (/review/i.test(type ?? "") ? "🧐" : /web|fetch/i.test(type ?? "") ? "🌐" : "🤖");
-
 /** Opus pink, Sonnet blue, Haiku teal, Fable yellow, anything else green. */
 export const modelColor = (k, id) => (/opus/.test(id ?? "") ? k.pink : /sonnet/.test(id ?? "") ? k.blue : /haiku/.test(id ?? "") ? k.teal : /fable/.test(id ?? "") ? k.yellow : k.green);
 
-// A tool as what it does: [icon, verb, how its target reads].
+// A tool as what it does: [chip, its color (a ui.js token), how its target reads].
 const VERBS = {
-  Read: ["📖", "Reading"], Write: ["✍️", "Writing"], Edit: ["✏️", "Editing"], MultiEdit: ["✏️", "Editing"], NotebookEdit: ["✏️", "Editing"],
-  Bash: ["▶️", "Running"], Grep: ["🔎", "Searching", (s) => `“${s}”`], Glob: ["🔎", "Finding", (s) => s], WebFetch: ["🌐", "Opening"],
-  WebSearch: ["🌐", "Searching the web for", (s) => `“${s}”`], Agent: ["🤝", "Starting helper"], Task: ["🤝", "Starting helper"],
-  TodoWrite: ["📋", "Updating its plan", () => ""], Skill: ["🧰", "Using skill"], ToolSearch: ["🧰", "Loading tools", () => ""],
-  SubagentHandback: ["📨", "Reporting back", () => ""],
+  Read: ["READ", "blue"], Grep: ["SEARCH", "blue", (s) => `“${s}”`], Glob: ["FIND", "blue"],
+  Write: ["WRITE", "green"], Edit: ["EDIT", "green"], MultiEdit: ["EDIT", "green"], NotebookEdit: ["EDIT", "green"],
+  Bash: ["RUN", "yellow"], WebFetch: ["WEB", "teal"], WebSearch: ["WEB", "teal", (s) => `“${s}”`],
+  Agent: ["HELPER", "pink"], Task: ["HELPER", "pink"], SubagentHandback: ["REPORT", "teal", () => ""],
+  TodoWrite: ["PLAN", "raised", () => ""], Skill: ["SKILL", "raised"], ToolSearch: ["TOOLS", "raised", () => ""],
 };
 
-/** What a subagent does now: { icon, verb, what }, 📖 "Reading" "src/app.js". */
+/** What a subagent does now: { label, tone, what }, "READ" "blue" "src/app.js". */
 export function activity(a) {
-  if (!a.tool) return { icon: "💭", verb: "Thinking…", what: "" };
-  const [icon, verb, how] = VERBS[a.tool] ?? ["🛠️", `Using ${a.tool}`];
-  return { icon, verb, what: how ? how(a.doing ?? "") : a.doing ?? "" };
+  if (!a.tool) return { label: "THINK", tone: "raised", what: "" };
+  const [label, tone, how] = VERBS[a.tool] ?? [a.tool.toUpperCase().slice(0, 10), "raised"];
+  return { label, tone, what: how ? how(a.doing ?? "") : a.doing ?? "" };
+}
+
+/** A small flat chip: a filled one on a bright tone, else ink on the theme's raised. */
+export function actionChip(k, label, tone) {
+  const bright = tone !== "raised";
+  return div()
+    .px(5)
+    .h(16)
+    .flex()
+    .flex_none()
+    .items_center()
+    .rounded(3)
+    .border(1.5)
+    .border_color(k.line)
+    .bg(k[tone])
+    .text_size(9.5)
+    .font_black()
+    .text_color(bright ? k.chipText : k.muted)
+    .child(label);
 }
 
 /** "≈$0.12", "<$0.01". */
@@ -131,7 +146,7 @@ export default class CrewDetail {
         h_flex()
           .gap(8)
           .items_center()
-          .child(div().text_size(18).child(a ? faceOf(a.type) : "👥"))
+          .child(icon("user-round", 18, k.ink))
           .child(
             v_flex()
               .flex_1()
@@ -187,8 +202,7 @@ export default class CrewDetail {
             .gap(8)
             .items_center()
             .child(div().w(56).flex_none().text_size(10.5).text_color(k.dim).child(time(c.at)))
-            .child(div().w(16).flex_none().text_size(11).child(c.failed ? "❌" : activity({ tool: c.tool }).icon))
-            .child(div().w(80).flex_none().truncate().text_size(11.5).font_bold().text_color(c.failed ? readable(k, k.red) : k.ink).child(c.tool))
+            .child(div().w(62).flex_none().child(c.failed ? actionChip(k, "FAILED", "red") : actionChip(k, activity({ tool: c.tool }).label, activity({ tool: c.tool }).tone)))
             .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(k.muted).child(c.what || "")),
         );
       }

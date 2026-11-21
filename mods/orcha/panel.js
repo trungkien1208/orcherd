@@ -11,7 +11,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { focused, panes, spaces, exec, run, readTextFile, home, shared, setShared, openOverlay, notify } from "herdr";
 import { tokens, button, icon, fuelGauge, readable, agentFacts, chip, modelLabel } from "./ui.js";
-import { crewChat, readCrew, openCrewDetail, clock, activity, modelColor } from "./crew.js";
+import { crewChat, readCrew, openCrewDetail, clock, activity, actionChip, modelColor } from "./crew.js";
 import { showSide } from "./sidetabs.js";
 import HandoffWatch from "./handoff-watch.js";
 import { refreshFuel, claudeAccountOf, readAccounts } from "./accounts-data.js";
@@ -134,11 +134,11 @@ export default class Panel {
     });
   }
 
-  // One block per subagent, its own helpers indented under it: a stripe in
-  // its state's color (PROCESS's), its task, model and clock, then what it
-  // does right now in words. A finished one is a line, until its helpers
-  // finish too and 5 minutes pass. Cost and everything it did are a click
-  // away (crew.js CrewDetail).
+  // One block per subagent, its helpers hanging from it on a tree line: a
+  // stripe in its state's color (PROCESS's) and its task, then its model and
+  // what it does right now (chips: OPUS 5.5 RUN…) and its clock. A
+  // finished one is a line, until its helpers finish too and 5 minutes pass.
+  // Cost and everything it did are a click away (crew.js CrewDetail).
   crewSection(t, crew) {
     const list = crew?.agents ?? [];
     const chat = crew?.chat;
@@ -150,51 +150,69 @@ export default class Panel {
     const row = (a) => {
       const live = a.status === "running";
       const helper = (a.depth ?? 1) > 1;
-      // Nothing written for a minute: say so (a long command, a stuck one).
+      // Minutes with nothing written: a long command, or a stuck one.
       const quiet = live && a.last ? Math.floor((now - a.last) / 60000) : 0;
-      const { icon, verb, what } = activity(a);
+      const { label, tone, what } = activity(a);
+      // Its model, outlined in the model's color: OPUS 5.5, SONNET 5.5, HAIKU 5.5.
+      const modelChip = () => {
+        const color = readable(t, modelColor(t, a.model));
+        return div().px(5).h(16).flex().flex_none().items_center().rounded(3).border(1.5).border_color(color).text_size(9.5).font_black().text_color(color).child(modelLabel(a.model).toUpperCase());
+      };
+      // Helpers start with their parent's clock running: only the top ones show one.
+      const time = helper || !a.start ? null : clock((live ? now : a.last ?? now) - a.start);
+      const line1 = h_flex()
+        .gap(6)
+        .items_center()
+        .when(!live, (el) => el.child(actionChip(t, "DONE", "green")))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_bold().text_color(live ? t.ink : t.muted).child(a.title))
+        .when(!live && Boolean(time), (el) => el.child(small(time)));
       const line2 = live
         ? h_flex()
             .gap(5)
             .items_center()
-            .child(div().flex_none().text_size(11).child(quiet ? "⏳" : icon))
-            .child(small(quiet ? `quiet ${quiet}m ·` : verb, quiet ? readable(t, t.yellow) : t.muted).font_bold())
-            .when(Boolean(quiet), (el) => el.child(small(verb, t.muted)))
-            .when(Boolean(what), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(what)))
+            .when(Boolean(a.model), (el) => el.child(modelChip()))
+            .child(actionChip(t, label, tone))
+            .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(what))
+            // Two minutes with nothing written: the clock says so instead.
+            .child(quiet >= 2 ? small(`quiet ${quiet}m`, readable(t, t.yellow)).font_bold() : time ? small(time) : div())
         : a.helpers
-          ? small(`🤝 handed off · ${a.helpers} helper${a.helpers === 1 ? "" : "s"} still working`)
+          ? small(`${a.helpers} helper${a.helpers === 1 ? "" : "s"} still working`, t.muted)
           : null;
       return h_flex()
         .id(`crew-${a.id}`)
-        .when(helper, (el) => el.pl(14 * ((a.depth ?? 1) - 1)))
         .gap(7)
-        .py(2)
+        .py(3)
         .rounded(4)
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_click(() => openCrewDetail(chat, a.id))
         .child(div().w(3).flex_none().self_stretch().rounded(2).bg(live ? t.yellow : t.green))
-        .child(
-          v_flex()
-            .flex_1()
-            .min_w(0)
-            .gap(1)
-            .child(
-              h_flex()
-                .gap(6)
-                .items_center()
-                .when(helper, (el) => el.child(small("↳")))
-                .when(!live, (el) => el.child(div().flex_none().text_size(11).child("✅")))
-                .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_bold().text_color(live ? t.ink : t.muted).child(a.title))
-                .when(Boolean(a.steps), (el) => el.child(small(`${a.steps?.done}/${a.steps?.total} steps`)))
-                .when(Boolean(a.model), (el) => el.child(small(modelLabel(a.model).split(" ")[0], readable(t, modelColor(t, a.model))).font_bold()))
-                // Helpers start with their parent's clock running: only the top ones show one.
-                .when(!helper && Boolean(a.start), (el) => el.child(small(live ? clock(now - a.start) : `took ${clock((a.last ?? now) - a.start)}`))),
-            )
-            .when(Boolean(line2), (el) => el.child(line2)),
-        );
+        .child(v_flex().flex_1().min_w(0).gap(1).child(line1).when(Boolean(line2), (el) => el.child(line2)));
     };
-    return this.section(t, "user-round", title, list.map(row), { fold: { open: this.crewOpen, toggle: () => (this.crewOpen = !this.crewOpen) } });
+    // The list comes depth first: back into a tree, helpers under their parent.
+    const roots = [];
+    const path = [];
+    for (const a of list) {
+      const n = { a, kids: [] };
+      path.length = Math.min(path.length, Math.max(0, (a.depth ?? 1) - 1));
+      (path.at(-1)?.kids ?? roots).push(n);
+      path.push(n);
+    }
+    // A branch of the tree line from the parent's stripe: ├ to a helper, └ to the last.
+    const rail = (last) =>
+      v_flex()
+        .w(14)
+        .flex_none()
+        .self_stretch()
+        .child(div().ml(1).h(12).flex_none().border_l(2).border_b(2).border_color(t.dim).rounded_bl(5))
+        .child(div().ml(1).flex_1().when(!last, (el) => el.border_l(2).border_color(t.dim)));
+    const node = (n) =>
+      v_flex()
+        .flex_1()
+        .min_w(0)
+        .child(row(n.a))
+        .children(n.kids.map((k, i) => h_flex().child(rail(i === n.kids.length - 1)).child(node(k))));
+    return this.section(t, "user-round", title, roots.map(node), { fold: { open: this.crewOpen, toggle: () => (this.crewOpen = !this.crewOpen) } });
   }
 
   currentFolder() {
