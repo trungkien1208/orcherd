@@ -23,8 +23,9 @@ import Finder from "./finder.js";
 import New from "./new.js";
 import Import from "./import.js";
 import CrewDetail from "./crew.js";
+import Setup from "./setup.js";
 
-const PARTS = { header: Header, left: Left, tabs: Tabs, pane: Pane, panel: Panel, status: Status, accounts: Accounts, menu: Menu, termmenu: TerminalMenu, icon: Icon, settings: Settings, sidetabs: SideTabs, files: Files, viewer: Viewer, finder: Finder, new: New, import: Import, crew: CrewDetail, spacer: class { render() { return div(); } } };
+const PARTS = { header: Header, left: Left, tabs: Tabs, pane: Pane, panel: Panel, status: Status, accounts: Accounts, menu: Menu, termmenu: TerminalMenu, icon: Icon, settings: Settings, sidetabs: SideTabs, files: Files, viewer: Viewer, finder: Finder, new: New, import: Import, crew: CrewDetail, setup: Setup, spacer: class { render() { return div(); } } };
 
 export default class Orcha extends View {
   init(_props, cx) {

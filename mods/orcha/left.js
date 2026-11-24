@@ -38,6 +38,8 @@ import { systemOpen } from "./links.js";
 import { menuHeight } from "./menu.js";
 import { ICON_OVERLAY } from "./icon.js";
 import { indexSpaces, readRepo, groupSpaces, isRepo, repoKey, moveGroup } from "./repos.js";
+import { readProject, wasAsked, markAsked, asksSetup } from "./project-setup.js";
+import { openSetup } from "./setup.js";
 import { openNew } from "./new.js";
 
 const GB = 1024 * 1024 * 1024;
@@ -175,6 +177,11 @@ export default class Left {
     // Projects showing their agents, remembered between restarts: one opens
     // when it is selected and stays open until its arrow closes it.
     this.opened = new Set(stored("orcha.opened"));
+    // Projects added from now on are asked their rules and skills (noticeNew).
+    // The ones a restart brings back are not new, however late they show.
+    this.seen = new Set(spaces().map((s) => s.id));
+    this.startedAt = Date.now();
+    this.fresh = []; // the new ones, waiting for the others an import adds
     this.readIcons(cx);
     this.readMemory(cx);
     this.readTranscripts(cx);
@@ -186,6 +193,48 @@ export default class Left {
     cx.timer.every(60000, (cx) => this.readIcons(cx));
     // A folder's repo rarely changes; a new folder is read on sight (render).
     cx.timer.every(60000, (cx) => this.readGit([...new Set([...indexSpaces(spaces(), panes()).values()].map((x) => x.key))], cx, true));
+  }
+
+  // New local projects, gathered for a moment: an import adds several.
+  noticeNew(list, cx) {
+    const fresh = list.filter((s) => !this.seen.has(s.id));
+    if (!fresh.length) return;
+    for (const s of fresh) this.seen.add(s.id);
+    if (Date.now() - this.startedAt < 3000) return;
+    const waiting = this.fresh.length > 0;
+    this.fresh.push(...fresh.filter((s) => !s.machine && s.folder).map((s) => s.id));
+    if (waiting || !this.fresh.length) return;
+    cx.timer.after(700, (cx) => {
+      const ids = this.fresh;
+      this.fresh = [];
+      this.askSetup(ids, cx);
+    });
+  }
+
+  // PROJECT SETUP for the one project just added, once per folder; a note
+  // where the rules are when several came at once. Not for a folder orcha
+  // had open already, a worktree (its repo was asked) or a project that has
+  // Orcherd's rules.
+  askSetup(ids, cx) {
+    cx.spawn(async () => {
+      const now = spaces();
+      const added = now.filter((s) => ids.includes(s.id) && !now.some((o) => !ids.includes(o.id) && !o.machine && o.folder === s.folder));
+      if (!added.length || !(await asksSetup())) return;
+      const todo = [];
+      for (const s of added) {
+        // Another window's sidebar sees the same project: one of them asks.
+        if (shared("orcha.setupAsked")?.[s.id]) continue;
+        setShared("orcha.setupAsked", { ...(shared("orcha.setupAsked") ?? {}), [s.id]: true });
+        if (todo.some((t) => t.folder === s.folder) || (await wasAsked(s.folder))) continue;
+        if ((await readRepo(`\n${s.folder}`))?.linked) continue;
+        if ((await readProject(s.folder)).rules.length) continue;
+        todo.push(s);
+      }
+      if (!todo.length) return;
+      await markAsked(todo.map((s) => s.folder));
+      if (todo.length === 1) openSetup(todo[0].id);
+      else notify({ title: "Working rules and skills", body: `Pick them for each of the ${todo.length} new projects in Settings › Projects.`, level: "info", timeout: 8000 });
+    });
   }
 
   readIcons(cx) {
@@ -972,6 +1021,7 @@ export default class Left {
     const allPanes = panes();
     const byPane = new Map(agents().map((a) => [a.pane, a]));
     const list = spaces();
+    this.noticeNew(list, cx);
     // Read once per frame and passed down: each space's panes, the agents' facts.
     this.index = indexSpaces(list, allPanes);
     this.facts = agentFacts();

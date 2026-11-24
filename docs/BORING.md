@@ -18,6 +18,7 @@ You clicked. Respect. Here's everything nobody reads.
 </table>
 
 - 🗂 **Projects**: cards per agent (model, context, RAM in green, yellow, red). Pick an icon from ~150 emoji. Drag one to reorder. **+ NEW** › New project… opens another folder (browse or type a path), the same folder again, or a new worktree. Closing a project's last pane closes the project.
+- 🧭 **Project setup**: a project you add asks once which working rules go in its `CLAUDE.md` and which skills to install; the same list stays in **Settings › Projects**, where the asking can be turned off (`ask_setup = false` under `[orcha]` in `~/.config/orcherd/config.toml`). Not for worktrees, remote projects or several projects imported at once.
 - 🌳 **Worktrees**: projects in one repo share a card, like Orca: a line per checkout (MAIN first), **+ worktree** to branch off, right-click › Remove worktree… (the branch stays).
 - 🖥 **Shells**: a shell running something shows it (`pnpm dev`) with a running dot, in the sidebar, its title bar and its tab; the ports it serves show as `:3000`, a click opens them.
 - 🔄 **Resume**: Herdr crashed or the Mac rebooted? Each Claude and Codex chat comes back in its pane (`claude --resume`, `codex resume`), no retyping.
@@ -143,6 +144,7 @@ curl -fsSL https://raw.githubusercontent.com/trungkien1208/orcherd/HEAD/uninstal
 
 - `mods/orcha/` is the plugin. `main.js` picks the part a layout block asks for; `ui.js` holds the look.
 - `catalog.js` holds the working rules and suggested skills of Settings › Projects: edit it directly.
+- `project-setup.js` reads and writes them for a project; Settings › Projects and PROJECT SETUP (`setup.js`, opened by `left.js` on a new project) both use it.
 - `settings.js` starts from Herdr's settings page: compare with a new Herdr's `frame/settings/main.js` on updates.
 - Animate with Herdr's native `.loop`, `.transition` and `.frames`, never timers.
 - Loop: `sh install.sh`, `herdr-app check ~/.config/herdr-app/mods/orcha`, `herdr-app shot shot.png`. Herdr refuses reloads after many in one run: batch your installs.

@@ -6,28 +6,11 @@ import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window, spaces, exec, home, layout, notify } from "herdr";
 import { RULES, SKILLS } from "./catalog.js";
+import { readProject, writeRules, rulesIn, installSkill, asksSetup, setAsksSetup } from "./project-setup.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
 import { VERSION, REPO, updateInfo, available, checkUpdate, runUpdate, restartNeeded, restartHerdr } from "./version.js";
 import { readAccounts, tokenState, needsSignIn, makeDefault, notifyError, logFailure, readDoctor, installPython, installClaude, writeDiagnostics, copyDiagnostics, fixWithAgent, moveToKeychain, unlockKeychain, openKeychainAccess, refreshFuel, addAccount, renameAccount, removeAccount, sameClaude, signIn, ACCOUNT_KINDS, readHandoff, writeHandoff, HANDOFF_DEFAULTS, isStation, stationStatus, stationProbe, stationPair, stationForget, stationAddress } from "./accounts-data.js";
-
-// Copies skill folders from a GitHub repo's tarball: no Node needed. A skill
-// is the folder whose SKILL.md says `name: <skill>`, else a folder so named.
-// Args: repo, destination, skill names.
-const FROM_GITHUB = `src=$1 dest=$2; shift 2
-tmp=$(mktemp -d) || exit 1
-trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "https://codeload.github.com/$src/tar.gz/HEAD" | tar -xz -C "$tmp" || { echo "could not download $src from GitHub" >&2; exit 1; }
-mkdir -p "$dest" || exit 1
-for name in "$@"; do
-  f=$(grep -rlE --include=SKILL.md "^name: *[\\"']?\${name}[\\"']? *\\$" "$tmp" | head -1)
-  [[ -z $f ]] && f=$(find "$tmp" -path "*/$name/SKILL.md" | head -1)
-  [[ -z $f ]] && { echo "$name is not in $src" >&2; exit 1; }
-  rm -rf "$dest/$name" && cp -R "\${f:h}" "$dest/$name" || exit 1
-done`;
-
-// `npx skills add` arguments: in the project, or for the user (-g).
-const skillArgs = (skill, global) => ["-y", "skills", "add", skill.source, "--skill", ...skill.skills, "-a", "claude-code", "-y", ...(global ? ["-g"] : [])];
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -46,54 +29,6 @@ const SECTIONS = [
   { id: "updates", title: "Updates", icon: "refresh" },
   { id: "privacy", title: "Privacy", icon: "shield" },
 ];
-
-// One marked block in CLAUDE.md holds the working rules (Orcherd's own markers).
-const BLOCK_START = "<!-- orcherd:rules start · managed by Orcherd (Settings › Projects); edit them there -->";
-const BLOCK_START_PREFIX = "<!-- orcherd:rules start";
-const BLOCK_END = "<!-- orcherd:rules end -->";
-const RULE_MARK = "<!-- orcherd:rule ";
-
-function blockSpan(text) {
-  const start = text.indexOf(BLOCK_START_PREFIX);
-  if (start < 0) return null;
-  const end = text.indexOf(BLOCK_END, start);
-  return end < 0 ? null : [start, end + BLOCK_END.length];
-}
-
-function rulesIn(text) {
-  const span = blockSpan(text);
-  if (!span) return [];
-  const block = text.slice(span[0], span[1]);
-  const ids = [];
-  let at = block.indexOf(RULE_MARK);
-  while (at >= 0) {
-    const id = block.slice(at + RULE_MARK.length).split(/\s/)[0];
-    if (RULES.some((r) => r.id === id)) ids.push(id);
-    at = block.indexOf(RULE_MARK, at + 1);
-  }
-  return ids;
-}
-
-function blockFor(ids) {
-  let out = `${BLOCK_START}\n## Working rules\n`;
-  for (const rule of RULES.filter((r) => ids.includes(r.id))) out += `\n${RULE_MARK}${rule.id} -->\n### ${rule.title}\n\n${rule.body}\n`;
-  return out + BLOCK_END;
-}
-
-function withRules(text, ids) {
-  const block = ids.length ? blockFor(ids) : null;
-  const span = blockSpan(text);
-  if (span && block) return text.slice(0, span[0]) + block + text.slice(span[1]);
-  if (span) {
-    const before = text.slice(0, span[0]).replace(/\n+$/, "");
-    const after = text.slice(span[1]).replace(/^\n+/, "");
-    if (!before) return after;
-    return after ? `${before}\n\n${after}` : `${before}\n`;
-  }
-  if (!block) return text;
-  if (!text.trim()) return `${block}\n`;
-  return `${text.replace(/\n+$/, "")}\n\n${block}\n`;
-}
 
 const LOOKS = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" };
 const APPEARANCES = [
@@ -118,6 +53,10 @@ export default class Settings {
     const asked = props()?.section ?? (pending && pending.until > Date.now() ? pending.id : null);
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "projects";
     this.orcha = { project: null, info: null, busy: {}, failed: {}, addKind: "claude", accountTab: "local", accounts: null, active: null, icons: {} };
+    cx.spawn(async (cx) => {
+      this.orcha.askSetup = await asksSetup();
+      cx.notify();
+    });
     cx.spawn(async (cx) => {
       try {
         this.orcha.icons = JSON.parse((await readTextFile(configFile("project-icons.json"))) ?? "{}") ?? {};
@@ -936,35 +875,12 @@ export default class Settings {
     return list.find((s) => s.id === this.orcha.project) ?? list.find((s) => s.active) ?? list[0] ?? null;
   }
 
-  // CLAUDE.md, unless the project keeps its rules in AGENTS.md (CLAUDE.md
-  // missing, or only pointing there): orcha_rules.rs instruction_file.
-  async instructionFile(folder) {
-    const claude = `${folder}/CLAUDE.md`;
-    const agents = `${folder}/AGENTS.md`;
-    const agentsText = await readTextFile(agents);
-    if (agentsText != null) {
-      const claudeText = await readTextFile(claude);
-      if (claudeText == null || claudeText.includes("AGENTS.md")) return { path: agents, text: agentsText };
-    }
-    return { path: claude, text: (await readTextFile(claude)) ?? "" };
-  }
-
   loadProject(cx) {
     const space = this.projectSpace();
     if (!space?.folder || this.orcha.loading === space.id) return;
     this.orcha.loading = space.id;
     cx.spawn(async (cx) => {
-      const folder = space.folder;
-      const file = await this.instructionFile(folder);
-      const installed = {};
-      for (const skill of SKILLS) {
-        const first = skill.skills[0];
-        installed[skill.name] = {
-          project: (await readTextFile(`${folder}/.claude/skills/${first}/SKILL.md`)) != null,
-          global: (await readTextFile(`${home()}/.claude/skills/${first}/SKILL.md`)) != null,
-        };
-      }
-      this.orcha.info = { space: space.id, folder, file, rules: rulesIn(file.text), installed };
+      this.orcha.info = { space: space.id, ...(await readProject(space.folder)) };
       this.orcha.loading = null;
       cx.notify();
     });
@@ -975,13 +891,9 @@ export default class Settings {
     const info = this.orcha.info;
     if (!info) return;
     cx.spawn(async (cx) => {
-      const raw = await readTextFile(info.file.path);
-      const before = raw ?? "";
-      const after = withRules(before, ids);
       try {
-        if (after !== before) await writeTextFile(info.file.path, after, raw);
-        info.file.text = after;
-        info.rules = rulesIn(after);
+        info.file.text = await writeRules(info.file.path, ids);
+        info.rules = rulesIn(info.file.text);
       } catch (err) {
         notifyError({ title: "The rules were not written", body: String(err), level: "error" });
       }
@@ -989,36 +901,27 @@ export default class Settings {
     });
   }
 
-  // `npx skills add` in the project, or for the user (-g): orcha_rules.rs install_skill.
-  // Without Node (or when npx fails) the skill folders come straight from GitHub.
   installSkill(skill, global, cx) {
     const info = this.orcha.info;
     if (!info || this.orcha.busy[skill.name]) return;
     this.orcha.busy[skill.name] = global ? "for you" : "here";
     cx.notify();
     cx.spawn(async (cx) => {
-      const args = skillArgs(skill, global);
-      // An app opened from the Dock has no shell PATH, and nvm, fnm and the
-      // like set it up in .zshrc, which only an interactive shell reads.
-      // Its input is /dev/null, so nothing in .zshrc can wait on a question.
-      let r = await exec("/bin/sh", ["-c", `exec /bin/zsh -lic 'exec npx "$@"' npx "$@" </dev/null`, "sh", ...args], { cwd: info.folder });
-      if (r.code !== 0) {
-        const dest = global ? `${home()}/.claude/skills` : `${info.folder}/.claude/skills`;
-        r = await exec("/bin/zsh", ["-c", FROM_GITHUB, "zsh", skill.source, dest, ...skill.skills], { cwd: info.folder });
-      }
+      const r = await installSkill(skill, info.folder, global);
       delete this.orcha.busy[skill.name];
-      if (r.code === 0) {
-        delete this.orcha.failed[`${global ? "" : info.folder}|${skill.name}`];
+      const key = `${global ? "" : info.folder}|${skill.name}`;
+      if (r.ok) {
+        delete this.orcha.failed[key];
         notify({ title: `${skill.title} installed`, level: "success", timeout: 4000 });
       } else {
         // The row then offers the command, to run by hand in a terminal.
-        const cd = global ? "" : `cd '${info.folder.replaceAll("'", "'\\''")}' && `;
-        this.orcha.failed[`${global ? "" : info.folder}|${skill.name}`] = `${cd}npx ${skillArgs(skill, global).join(" ")}`;
-        notifyError({ title: `${skill.title} was not installed`, body: (r.stderr || r.stdout || "no internet?").trim().split("\n").pop(), level: "error" });
+        this.orcha.failed[key] = r.command;
+        notifyError({ title: `${skill.title} was not installed`, body: r.error, level: "error" });
       }
       this.loadProject(cx);
     });
   }
+
 
   // Projects as vertical tabs beside the page: their own scroll, so the list
   // stays put while the rules scroll.
@@ -1117,6 +1020,22 @@ export default class Settings {
       const about = failed ? `Not installed. Copy the command and run it in Terminal, or try again. · ${skill.source}` : `${skill.summary} · ${skill.source}`;
       out.child(this.row(t, skill.title, about, control));
     }
+    // For every project, not only this one.
+    const asks = this.orcha.askSetup !== false;
+    out.child(div().pt(18)).child(this.heading(t, "New projects"));
+    out.child(
+      this.row(t, "Ask when a project is added", "Shows these rules and skills once for a project you add. Not for worktrees, or several projects imported at once.", this.toggle(t, "ask-setup", asks, (_e, cx) => {
+        this.orcha.askSetup = !asks;
+        cx.notify();
+        cx.spawn(async (cx) => {
+          const failed = await setAsksSetup(!asks);
+          if (!failed) return;
+          this.orcha.askSetup = asks;
+          notifyError({ title: "The setting was not saved", body: failed, level: "error" });
+          cx.notify();
+        });
+      })),
+    );
     return out;
   }
 
