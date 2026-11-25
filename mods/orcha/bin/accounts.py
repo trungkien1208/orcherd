@@ -1177,10 +1177,17 @@ def cmd_remove(acct):
 
 
 def folder_in_use(d):
-    """Whether a Claude (any process with CLAUDE_CONFIG_DIR=d) runs now."""
+    """Whether a Claude (a `claude` process with CLAUDE_CONFIG_DIR=d) runs now.
+    Only Claude itself counts: a tool a chat started (a simulator companion, a
+    shell) inherits the variable and can outlive the chat, and would keep the
+    folder lent forever."""
     d = os.path.expanduser(d)
     r = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "command="], capture_output=True, text=True, timeout=10)
-    return r.returncode != 0 or re.search(rf"(^|\s)CLAUDE_CONFIG_DIR={re.escape(d)}(\s|$)", r.stdout) is not None
+    if r.returncode != 0:
+        return True
+    env = re.compile(rf"(^|\s)CLAUDE_CONFIG_DIR={re.escape(d)}(\s|$)")
+    return any(os.path.basename(line.split(maxsplit=1)[0]) == "claude" and env.search(line)
+               for line in r.stdout.splitlines() if line.strip())
 
 
 def free_folders(acct):
