@@ -41,6 +41,48 @@ export const RULES = [
     "title": "Keep a hand-off checklist",
     "summary": "on long tasks, keep .orcherd/handoff.md current so another agent can continue",
     "body": "On a task that takes more than a few steps, keep `.orcherd/handoff.md` up to date: what is done, what is next as `- [ ]` items, open questions, and the files touched. Another agent may have to continue from it if you run out of plan."
+  },
+  {
+    "id": "root-cause",
+    "title": "Fix the cause, not the symptom",
+    "summary": "reproduce, trace back to the first wrong step and fix it there; no hiding guards",
+    "body": "When fixing a bug, reproduce it first, then trace it back to the first place the code did something wrong and fix it there. If the state that broke things should never exist, do not add a guard, retry, clamp or swallowed error where it surfaced: find what produced it. Look for the same fault elsewhere and fix those too."
+  }
+];
+
+// Skill groups, in the order Settings › Projects and PROJECT SETUP show them.
+export const GROUPS = [
+  {
+    "name": "Plan",
+    "about": "Before coding: turn an idea into a plan you both agree on."
+  },
+  {
+    "name": "Build",
+    "about": "While coding: small changes, tests first, code that reads well."
+  },
+  {
+    "name": "Debug",
+    "about": "When something breaks or gets slow: find the real cause first."
+  },
+  {
+    "name": "Check",
+    "about": "Before merging: prove it works and find what it could break."
+  },
+  {
+    "name": "UI",
+    "about": "Building screens: a look of its own and polished details."
+  },
+  {
+    "name": "Talk",
+    "about": "How the agent talks to you and how its writing sounds."
+  },
+  {
+    "name": "Catch up",
+    "about": "Coming back to a chat, or handing it to a fresh agent."
+  },
+  {
+    "name": "Skills",
+    "about": "Find more skills, or make your own."
   }
 ];
 
@@ -48,7 +90,7 @@ export const SKILLS = [
   {
     "name": "to-tickets",
     "title": "To tickets",
-    "summary": "turns a plan into small vertical slices you can pick up one by one",
+    "summary": "cuts a plan into small slices, each one you can build and check on its own. Type /to-tickets",
     "group": "Plan",
     "source": "mattpocock/skills",
     "skills": [
@@ -58,7 +100,7 @@ export const SKILLS = [
   {
     "name": "grill-me",
     "title": "Grill me",
-    "summary": "interviews you about a plan until every open question is answered",
+    "summary": "asks you question after question about a plan until nothing is left open. Type /grill-me",
     "group": "Plan",
     "source": "mattpocock/skills",
     "skills": [
@@ -68,7 +110,7 @@ export const SKILLS = [
   {
     "name": "writing-plans",
     "title": "Superpowers: plans",
-    "summary": "brainstorm, write a step-by-step plan, then execute it with checks",
+    "summary": "brainstorms with you, writes a step-by-step plan, then works through it with checks",
     "group": "Plan",
     "source": "obra/superpowers",
     "skills": [
@@ -78,9 +120,19 @@ export const SKILLS = [
     ]
   },
   {
+    "name": "improve-codebase-architecture",
+    "title": "Improve architecture",
+    "summary": "finds code that is hard to test or change, suggests how to reshape it, then talks the one you pick through. Type /improve-codebase-architecture",
+    "group": "Plan",
+    "source": "mattpocock/skills",
+    "skills": [
+      "improve-codebase-architecture"
+    ]
+  },
+  {
     "name": "tdd",
     "title": "Test-driven development",
-    "summary": "a failing test first, then the code that makes it pass",
+    "summary": "writes a failing test first, then just enough code to make it pass",
     "group": "Build",
     "source": "mattpocock/skills",
     "skills": [
@@ -88,20 +140,9 @@ export const SKILLS = [
     ]
   },
   {
-    "name": "systematic-debugging",
-    "title": "Superpowers: debugging",
-    "summary": "find the cause before changing code, and verify before calling it done",
-    "group": "Build",
-    "source": "obra/superpowers",
-    "skills": [
-      "systematic-debugging",
-      "verification-before-completion"
-    ]
-  },
-  {
     "name": "ponytail",
     "title": "Ponytail",
-    "summary": "the smallest change that solves it, plus a plain-English review",
+    "summary": "the smallest change that solves the task, plus a code review in plain English",
     "group": "Build",
     "source": "DietrichGebert/ponytail",
     "skills": [
@@ -110,19 +151,80 @@ export const SKILLS = [
     ]
   },
   {
-    "name": "make-interfaces-feel-better",
-    "title": "Interfaces that feel better",
-    "summary": "UI polish: spacing, motion, shadows, hover and focus details",
-    "group": "UI",
-    "source": "jakubkrehel/make-interfaces-feel-better",
+    "name": "code-simplification",
+    "title": "Code simplification",
+    "summary": "makes working code easier to read without changing what it does",
+    "group": "Build",
+    "source": "addyosmani/agent-skills",
     "skills": [
-      "make-interfaces-feel-better"
+      "code-simplification"
+    ]
+  },
+  {
+    "name": "systematic-debugging",
+    "title": "Superpowers: debugging",
+    "summary": "finds the cause before touching code, and checks the fix before calling it done",
+    "group": "Debug",
+    "source": "obra/superpowers",
+    "skills": [
+      "systematic-debugging",
+      "verification-before-completion"
+    ]
+  },
+  {
+    "name": "diagnosing-bugs",
+    "title": "Diagnosing bugs",
+    "summary": "a step-by-step loop for hard bugs and slowdowns: reproduce, narrow it down, prove the cause",
+    "group": "Debug",
+    "source": "mattpocock/skills",
+    "skills": [
+      "diagnosing-bugs"
+    ]
+  },
+  {
+    "name": "blast-radius",
+    "title": "Blast radius",
+    "summary": "finds what a change could break outside the diff, and proves the key safety point by running code. Type /blast-radius",
+    "group": "Check",
+    "source": "cursor/plugins",
+    "skills": [
+      "blast-radius"
+    ]
+  },
+  {
+    "name": "doubt-driven-development",
+    "title": "Doubt-driven development",
+    "summary": "a fresh reviewer tries to disprove each big decision before the agent builds on it",
+    "group": "Check",
+    "source": "addyosmani/agent-skills",
+    "skills": [
+      "doubt-driven-development"
+    ]
+  },
+  {
+    "name": "agent-browser",
+    "title": "Agent browser",
+    "summary": "the agent opens your web app, clicks through it and takes screenshots. Needs the CLI: npm i -g agent-browser",
+    "group": "Check",
+    "source": "vercel-labs/agent-browser",
+    "skills": [
+      "agent-browser"
+    ]
+  },
+  {
+    "name": "correct",
+    "title": "Correct",
+    "summary": "turns mistakes agents keep repeating in this repo into checks that block them. Type /correct after you had to correct one",
+    "group": "Check",
+    "source": "cursor/plugins",
+    "skills": [
+      "correct"
     ]
   },
   {
     "name": "design-taste-frontend",
     "title": "Design taste",
-    "summary": "landing pages and redesigns that do not look templated",
+    "summary": "landing pages and redesigns that do not look like a template",
     "group": "UI",
     "source": "leonxlnx/taste-skill",
     "skills": [
@@ -130,9 +232,29 @@ export const SKILLS = [
     ]
   },
   {
+    "name": "frontend-design",
+    "title": "Frontend design",
+    "summary": "Anthropic's guide to a look of its own: colors, type and layout picked for the brief",
+    "group": "UI",
+    "source": "anthropics/skills",
+    "skills": [
+      "frontend-design"
+    ]
+  },
+  {
+    "name": "make-interfaces-feel-better",
+    "title": "Interfaces that feel better",
+    "summary": "polishes the details: spacing, motion, shadows, hover and focus",
+    "group": "UI",
+    "source": "jakubkrehel/make-interfaces-feel-better",
+    "skills": [
+      "make-interfaces-feel-better"
+    ]
+  },
+  {
     "name": "i-have-adhd",
     "title": "I have ADHD",
-    "summary": "answers lead with the next step, number the work and skip tangents",
+    "summary": "answers start with the next step, number the work and skip tangents. Type /i-have-adhd",
     "group": "Talk",
     "source": "ayghri/i-have-adhd",
     "skills": [
@@ -142,7 +264,7 @@ export const SKILLS = [
   {
     "name": "caveman",
     "title": "Caveman",
-    "summary": "short answers, same facts: far fewer words and tokens",
+    "summary": "short answers with the same facts: far fewer words and tokens. Type /caveman",
     "group": "Talk",
     "source": "JuliusBrussee/caveman",
     "skills": [
@@ -155,20 +277,51 @@ export const SKILLS = [
     "name": "humanizer",
     "title": "Humanizer",
     "summary": "rewrites text so it stops sounding like AI",
-    "group": "Writing",
+    "group": "Talk",
     "source": "blader/humanizer",
     "skills": [
       "humanizer"
     ]
   },
   {
+    "name": "ketchup",
+    "title": "Ketchup",
+    "summary": "what changed since your last message and every decision waiting on you. Type /ketchup, or /bro to restate the last reply plainly",
+    "group": "Catch up",
+    "source": "cursor/plugins",
+    "skills": [
+      "ketchup",
+      "bro"
+    ]
+  },
+  {
+    "name": "handoff",
+    "title": "Handoff",
+    "summary": "squeezes the chat into a note a fresh agent can continue from. Type /handoff",
+    "group": "Catch up",
+    "source": "mattpocock/skills",
+    "skills": [
+      "handoff"
+    ]
+  },
+  {
     "name": "find-skills",
     "title": "Find skills",
-    "summary": "searches for more skills when you ask how to do something",
-    "group": "Writing",
+    "summary": "looks for a ready-made skill when you ask how to do something",
+    "group": "Skills",
     "source": "vercel-labs/skills",
     "skills": [
       "find-skills"
+    ]
+  },
+  {
+    "name": "skill-creator",
+    "title": "Skill creator",
+    "summary": "writes a new skill with you, tests it and tunes when it kicks in",
+    "group": "Skills",
+    "source": "anthropics/skills",
+    "skills": [
+      "skill-creator"
     ]
   }
 ];

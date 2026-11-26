@@ -5,7 +5,7 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window, spaces, exec, home, layout, notify } from "herdr";
-import { RULES, SKILLS } from "./catalog.js";
+import { GROUPS, RULES, SKILLS } from "./catalog.js";
 import { readProject, writeRules, rulesIn, installSkill, asksSetup, setAsksSetup } from "./project-setup.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
@@ -997,6 +997,8 @@ export default class Settings {
       if (skill.group !== group) {
         group = skill.group;
         out.child(div().pt(18)).child(this.heading(t, `Skills · ${group}`));
+        const about = GROUPS.find((g) => g.name === group)?.about;
+        if (about) out.child(div().pb(4).text_size(12.5).text_color(t.dim).child(about));
       }
       const where = info.installed[skill.name] ?? {};
       const busy = this.orcha.busy[skill.name];

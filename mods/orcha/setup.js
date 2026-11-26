@@ -6,7 +6,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, props, closeOverlay, openOverlay, notify } from "herdr";
-import { RULES, SKILLS } from "./catalog.js";
+import { GROUPS, RULES, SKILLS } from "./catalog.js";
 import { readProject, writeRules, rulesIn, installSkill, setAsksSetup } from "./project-setup.js";
 import { notifyError } from "./accounts-data.js";
 import { tokens, raised, icon, button } from "./ui.js";
@@ -140,6 +140,8 @@ export default class Setup {
       if (skill.group !== group) {
         group = skill.group;
         out.child(this.heading(k, `Skills · ${group}`));
+        const about = GROUPS.find((g) => g.name === group)?.about;
+        if (about) out.child(div().px(8).pb(4).text_size(12).text_color(k.dim).child(about));
       }
       const where = info.installed[skill.name] ?? {};
       const busy = this.busy[skill.name];
