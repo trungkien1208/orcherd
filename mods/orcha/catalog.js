@@ -13,6 +13,12 @@ export const RULES = [
     "body": "Do not call work done until you have run the project's own checks (typecheck, tests, lint) on what you changed. Report the real result: paste failures, and say plainly when a check was skipped or could not run."
   },
   {
+    "id": "testing",
+    "title": "Test in a tight loop",
+    "summary": "narrowest test first, behavior not internals, a failing test for every bug, never weaken a test",
+    "body": "- Use the project's own test commands (package.json scripts, Makefile, CI config); do not invent new ones.\n- Run the narrowest test first: the case or file you touched, while you work. Run the full suite once before calling the work done.\n- For a bug, first write a test that fails because of it, then fix the code and keep the test.\n- Test behavior through the public interface, not private details. Mock only at the edges (network, clock, filesystem, paid APIs), never the code under test.\n- Keep tests fast and deterministic: no sleeps, fixed seeds and clocks, no order dependence.\n- Never skip, delete or loosen a test, or change an expected value, just to get green. If the test is wrong, say why before changing it. A flaky test is a bug: report it.\n- Report what ran and the real result, including what you did not run."
+  },
+  {
     "id": "commit",
     "title": "Propose the commit message first",
     "summary": "small commits, a message the user agrees to before committing, never push unasked",
@@ -43,6 +49,12 @@ export const RULES = [
     "body": "On a task that takes more than a few steps, keep `.orcherd/handoff.md` up to date: what is done, what is next as `- [ ]` items, open questions, and the files touched. Another agent may have to continue from it if you run out of plan."
   },
   {
+    "id": "subagents",
+    "title": "Use subagents on purpose",
+    "summary": "delegate wide searches and independent work, brief them fully, run them in parallel, check what comes back",
+    "body": "- Hand a subagent work that would flood your context (sweeping many files, long logs, broad research) or independent pieces that can run side by side. Do small lookups and one-file edits yourself.\n- Brief it like a new teammate who has seen nothing: the goal, what is already known or ruled out, the files to start from, the scope it must stay in, and the exact shape of the answer (a file:line list, a yes/no with evidence, a short summary).\n- Ask for conclusions, not file dumps, and keep its answer short so your context stays clean.\n- Start independent subagents together in one message. Never let two of them edit the same files at once; give writers separate files or worktrees.\n- Give evidence, not your guess to confirm: a subagent handed a hypothesis tends to agree with it.\n- Treat what comes back as claims: check the ones you build on before you rely on them. Do not redo work you delegated, and do not spawn more agents than the task needs."
+  },
+  {
     "id": "root-cause",
     "title": "Fix the cause, not the symptom",
     "summary": "reproduce, trace back to the first wrong step and fix it there; no hiding guards",
@@ -58,7 +70,11 @@ export const GROUPS = [
   },
   {
     "name": "Build",
-    "about": "While coding: small changes, tests first, code that reads well."
+    "about": "While coding: small changes and code that reads well."
+  },
+  {
+    "name": "Test",
+    "about": "Proving code works: tests that catch real bugs and a fast loop to run them."
   },
   {
     "name": "Debug",
@@ -67,6 +83,10 @@ export const GROUPS = [
   {
     "name": "Check",
     "about": "Before merging: prove it works and find what it could break."
+  },
+  {
+    "name": "Subagents",
+    "about": "Splitting work across fresh agents without losing the thread."
   },
   {
     "name": "UI",
@@ -133,7 +153,7 @@ export const SKILLS = [
     "name": "tdd",
     "title": "Test-driven development",
     "summary": "writes a failing test first, then just enough code to make it pass",
-    "group": "Build",
+    "group": "Test",
     "source": "mattpocock/skills",
     "skills": [
       "tdd"
@@ -205,7 +225,7 @@ export const SKILLS = [
     "name": "agent-browser",
     "title": "Agent browser",
     "summary": "the agent opens your web app, clicks through it and takes screenshots. Needs the CLI: npm i -g agent-browser",
-    "group": "Check",
+    "group": "Test",
     "source": "vercel-labs/agent-browser",
     "skills": [
       "agent-browser"
@@ -219,6 +239,27 @@ export const SKILLS = [
     "source": "cursor/plugins",
     "skills": [
       "correct"
+    ]
+  },
+  {
+    "name": "webapp-testing",
+    "title": "Web app testing",
+    "summary": "Anthropic's Playwright kit: drives your local web app, checks it works, reads its logs and takes screenshots",
+    "group": "Test",
+    "source": "anthropics/skills",
+    "skills": [
+      "webapp-testing"
+    ]
+  },
+  {
+    "name": "subagent-driven-development",
+    "title": "Superpowers: subagents",
+    "summary": "runs a plan with a fresh subagent per task and a review after each, and sends independent tasks out in parallel",
+    "group": "Subagents",
+    "source": "obra/superpowers",
+    "skills": [
+      "subagent-driven-development",
+      "dispatching-parallel-agents"
     ]
   },
   {

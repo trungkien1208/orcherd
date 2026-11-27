@@ -6,7 +6,8 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, props, closeOverlay, openOverlay, notify } from "herdr";
-import { GROUPS, RULES, SKILLS } from "./catalog.js";
+import { RULES } from "./catalog.js";
+import { projectView } from "./project-view.js";
 import { readProject, writeRules, rulesIn, installSkill, setAsksSetup } from "./project-setup.js";
 import { notifyError } from "./accounts-data.js";
 import { tokens, raised, icon, button } from "./ui.js";
@@ -20,6 +21,7 @@ export default class Setup {
   constructor(cx) {
     this.space = spaces().find((s) => s.id === props()?.space) ?? null;
     this.info = null; // readProject()
+    this.tab = "rules"; // or "skills"
     this.busy = {}; // skill name → "here" | "for you"
     this.failed = {}; // skill name → the command to run by hand
     this.handle = cx.focus_handle();
@@ -83,92 +85,22 @@ export default class Setup {
     });
   }
 
-  heading(k, text) {
-    return div().pt(14).pb(4).px(8).text_size(11).font_black().text_color(k.muted).child(text.toUpperCase());
-  }
-
-  // What it is on the left, the control on the right: as Settings draws it.
-  row(k, title, about, control) {
-    return h_flex()
-      .w_full()
-      .gap(14)
-      .px(8)
-      .py(8)
-      .items_center()
-      .border_b(1)
-      .border_color(k.border)
-      .child(
-        v_flex()
-          .flex_1()
-          .min_w(0)
-          .gap(2)
-          .child(div().text_size(13).font_semibold().text_color(k.ink).child(title))
-          .child(div().text_size(11.5).line_height("16px").text_color(k.dim).child(about)),
-      )
-      .child(div().flex_none().child(control));
-  }
-
-  toggle(k, id, on, onClick) {
-    return div()
-      .id(id)
-      .w(38)
-      .h(22)
-      .rounded(11)
-      .p(2)
-      .border(2)
-      .border_color(k.line)
-      .cursor_pointer()
-      .bg(on ? k.green : k.card)
-      .flex()
-      .items_center()
-      .when(on, (el) => el.justify_end())
-      .on_click(onClick)
-      .child(div().w(14).h(14).rounded(7).bg(on ? k.line : k.muted));
-  }
-
   rows(k) {
-    const info = this.info;
-    const out = v_flex().w_full();
-    if (!this.space?.folder) return out.child(div().p(10).text_color(k.dim).child("This project is gone."));
-    if (!info) return out.child(div().p(10).text_color(k.dim).child("Reading the project…"));
-    out.child(this.heading(k, `Working rules · ${info.file.path.split("/").pop()}`));
-    for (const rule of RULES) {
-      out.child(this.row(k, rule.title, rule.summary, this.toggle(k, `su-rule-${rule.id}`, info.rules.includes(rule.id), (_e, cx) => this.toggleRule(rule.id, cx))));
-    }
-    let group = null;
-    for (const skill of SKILLS) {
-      if (skill.group !== group) {
-        group = skill.group;
-        out.child(this.heading(k, `Skills · ${group}`));
-        const about = GROUPS.find((g) => g.name === group)?.about;
-        if (about) out.child(div().px(8).pb(4).text_size(12).text_color(k.dim).child(about));
-      }
-      const where = info.installed[skill.name] ?? {};
-      const busy = this.busy[skill.name];
-      const failed = this.failed[skill.name];
-      const note = (text, color) => div().text_size(12).font_semibold().text_color(color).child(text);
-      const control = busy
-        ? note(`installing ${busy}…`, k.dim)
-        : where.project
-          ? note("✓ in this project", k.green)
-          : where.global
-            ? note("✓ for you", k.green)
-            : h_flex()
-                .gap(6)
-                .when(Boolean(failed), (el) =>
-                  el.child(
-                    button(k, `su-c-${skill.name}`, "Copy command", (_e, cx) => {
-                      cx.write_to_clipboard(failed);
-                      notify({ title: "Install command copied", body: "Paste it in Terminal and press Return. It needs Node.js (nodejs.org).", level: "info", timeout: 6000 });
-                    }, { small: true }),
-                  ),
-                )
-                .child(button(k, `su-p-${skill.name}`, "Add here", (_e, cx) => this.install(skill, false, cx), { small: true }))
-                .child(button(k, `su-g-${skill.name}`, "For me", (_e, cx) => this.install(skill, true, cx), { small: true }));
-      const about = failed ? `Not installed. Copy the command and run it in Terminal, or try again. · ${skill.source}` : `${skill.summary} · ${skill.source}`;
-      out.child(this.row(k, skill.title, about, control));
-    }
-    return out;
+    if (!this.space?.folder) return div().p(10).text_color(k.dim).child("This project is gone.");
+    if (!this.info) return div().p(10).text_color(k.dim).child("Reading the project…");
+    const state = { info: this.info, tab: this.tab, busy: this.busy, failed: (name) => this.failed[name] };
+    return projectView(k, "su", state, {
+      tab: (id, cx) => {
+        this.tab = id;
+        cx.notify();
+      },
+      toggleRule: (id, cx) => this.toggleRule(id, cx),
+      install: (skill, global, cx) => this.install(skill, global, cx),
+      copy: (command, cx) => {
+        cx.write_to_clipboard(command);
+        notify({ title: "Install command copied", body: "Paste it in Terminal and press Return. It needs Node.js (nodejs.org).", level: "info", timeout: 6000 });
+      },
+    });
   }
 
   render(_cx) {
@@ -202,9 +134,9 @@ export default class Setup {
               .child(icon("git-fork", 15, k.ink))
               .child(div().text_size(12.5).font_black().text_color(k.ink).child(`PROJECT SETUP · ${this.space?.name ?? ""}`)),
           )
-          .child(div().text_size(11.5).text_color(k.muted).child("How agents should work in this project. Rules go in one block orcha keeps; what your team wrote around it stays as it is.")),
+          .child(div().text_size(11.5).text_color(k.muted).child("How agents should work here: rules for its instructions file, and skills to add. Changes are saved as you make them.")),
       )
-      .child(v_flex().id("setup-rows").flex_1().min_h(0).px(6).pb(8).overflow_y_scrollbar().child(this.rows(k)))
+      .child(v_flex().id("setup-rows").flex_1().min_h(0).px(14).pt(14).pb(14).overflow_y_scrollbar().child(this.rows(k)))
       .child(
         h_flex()
           .flex_none()

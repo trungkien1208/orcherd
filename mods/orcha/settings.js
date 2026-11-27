@@ -5,7 +5,8 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, TextView } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window, spaces, exec, home, layout, notify } from "herdr";
-import { GROUPS, RULES, SKILLS } from "./catalog.js";
+import { RULES } from "./catalog.js";
+import { projectView } from "./project-view.js";
 import { readProject, writeRules, rulesIn, installSkill, asksSetup, setAsksSetup } from "./project-setup.js";
 import { configFile } from "./paths.js";
 import { fuelGauge, tokens, projectTile, raised, chip } from "./ui.js";
@@ -974,57 +975,50 @@ export default class Settings {
 
   projects(t, cx) {
     const space = this.projectSpace();
-    const info = this.orcha.info;
-    if (space && info?.space !== space.id) this.loadProject(cx);
+    // Another project's info, until this one is read.
+    const info = this.orcha.info?.space === space?.id ? this.orcha.info : null;
+    if (space && !info) this.loadProject(cx);
     const out = v_flex().w_full();
     if (!space) return out.child(div().text_color(t.dim).child("Open a project first."));
-    out.child(div().text_size(16).font_semibold().text_color(t.foreground).child(space.name));
-    if (!info) return out.child(div().pt(12).text_color(t.dim).child("Reading the project…"));
-    const fileName = info.file.path.split("/").pop();
-    out.child(div().pt(4).pb(4).text_size(12.5).text_color(t.dim).child(`Rules go in ${fileName}, as one block orcha keeps; what your team wrote around it stays as it is.`));
-    out.child(div().pt(12)).child(this.heading(t, "Working rules"));
-    for (const rule of RULES) {
-      const on = info.rules.includes(rule.id);
-      out.child(
-        this.row(t, rule.title, rule.summary, this.toggle(t, `rule-${rule.id}`, on, (_e, cx) => {
-          const ids = RULES.map((r) => r.id).filter((id) => (id === rule.id ? !on : info.rules.includes(id)));
-          this.setRules(ids, cx);
-        })),
-      );
-    }
-    let group = null;
-    for (const skill of SKILLS) {
-      if (skill.group !== group) {
-        group = skill.group;
-        out.child(div().pt(18)).child(this.heading(t, `Skills · ${group}`));
-        const about = GROUPS.find((g) => g.name === group)?.about;
-        if (about) out.child(div().pb(4).text_size(12.5).text_color(t.dim).child(about));
-      }
-      const where = info.installed[skill.name] ?? {};
-      const busy = this.orcha.busy[skill.name];
-      const failed = this.orcha.failed[`${info.folder}|${skill.name}`] ?? this.orcha.failed[`|${skill.name}`];
-      const control = busy
-        ? div().text_size(12.5).text_color(t.dim).child(`installing ${busy}…`)
-        : where.project
-          ? div().text_size(12.5).text_color(t.done).child("✓ in this project")
-          : where.global
-            ? div().text_size(12.5).text_color(t.done).child("✓ for you")
-            : h_flex()
-                .gap(6)
-                .when(Boolean(failed), (el) =>
-                  el.child(this.button(t, `sk-c-${skill.name}`, "Copy command", (_e, cx) => {
-                    cx.write_to_clipboard(failed);
-                    notify({ title: "Install command copied", body: "Paste it in Terminal and press Return. It needs Node.js (nodejs.org).", level: "info", timeout: 6000 });
-                  })),
-                )
-                .child(this.button(t, `sk-p-${skill.name}`, "Add here", (_e, cx) => this.installSkill(skill, false, cx)))
-                .child(this.button(t, `sk-g-${skill.name}`, "For me", (_e, cx) => this.installSkill(skill, true, cx)));
-      const about = failed ? `Not installed. Copy the command and run it in Terminal, or try again. · ${skill.source}` : `${skill.summary} · ${skill.source}`;
-      out.child(this.row(t, skill.title, about, control));
-    }
+    const k = tokens();
+    out.child(
+      h_flex()
+        .pb(14)
+        .gap(10)
+        .items_center()
+        .child(projectTile(k, space.name, this.orcha.icons[space.folder], 30))
+        .child(
+          v_flex()
+            .flex_1()
+            .min_w(0)
+            .child(div().text_size(17).font_black().text_color(k.ink).truncate().child(space.name))
+            .child(div().text_size(11.5).text_color(k.dim).truncate().child(info ? info.file.path.replace(home(), "~") : space.folder)),
+        ),
+    );
+    if (!info) return out.child(div().text_color(t.dim).child("Reading the project…"));
+    const state = {
+      info,
+      tab: this.orcha.projectTab,
+      busy: this.orcha.busy,
+      failed: (name) => this.orcha.failed[`${info.folder}|${name}`] ?? this.orcha.failed[`|${name}`],
+    };
+    out.child(
+      projectView(k, "op", state, {
+        tab: (id, cx) => {
+          this.orcha.projectTab = id;
+          cx.notify();
+        },
+        toggleRule: (id, cx) => this.setRules(RULES.map((r) => r.id).filter((r) => (r === id ? !info.rules.includes(r) : info.rules.includes(r))), cx),
+        install: (skill, global, cx) => this.installSkill(skill, global, cx),
+        copy: (command, cx) => {
+          cx.write_to_clipboard(command);
+          notify({ title: "Install command copied", body: "Paste it in Terminal and press Return. It needs Node.js (nodejs.org).", level: "info", timeout: 6000 });
+        },
+      }),
+    );
     // For every project, not only this one.
     const asks = this.orcha.askSetup !== false;
-    out.child(div().pt(18)).child(this.heading(t, "New projects"));
+    out.child(div().pt(24)).child(this.heading(t, "New projects"));
     out.child(
       this.row(t, "Ask when a project is added", "Shows these rules and skills once for a project you add. Not for worktrees, or several projects imported at once.", this.toggle(t, "ask-setup", asks, (_e, cx) => {
         this.orcha.askSetup = !asks;
